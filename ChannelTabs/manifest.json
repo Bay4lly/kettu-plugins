@@ -1,13 +1,13 @@
 {
   "name": "Kettu ChannelTabs",
-  "description": "Discord mobilin en üstüne Chrome tarzı kalıcı kanal/DM sekmeleri ekler; yeni sekme, son kanallar, unread ve mention desteği içerir.",
+  "description": "Discord mobilin en üstünde tek, kalıcı Chrome tarzı kanal/DM sekme çubuğu.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "8f0ba60f7a98ada85b03c6ec1193cfe63969d0abf5e80689e7575549340de2e6",
+  "hash": "3.2.0",
   "vendetta": {
     "icon": "ic_tabs_24px"
   }
