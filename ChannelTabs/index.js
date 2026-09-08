@@ -1,6 +1,6 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
-/* Kettu ChannelTabs v3.4.0 - global Chrome-like persistent top tabs for Discord mobile */
+/* Kettu ChannelTabs v3.5.0 - global Chrome-like persistent top tabs for Discord mobile */
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
@@ -51,6 +51,7 @@ function defaults(){
   compact:false,
   haptic:true,
   statusBarSpacing:false,
+  barTopOffset:4,
   longPressActions:true,
   restoreTabs:true,
   focusExistingOnNew:true
@@ -289,7 +290,9 @@ function TabsBar(){
  useRefresh();diag.renders++;
  const V=RN.View,T=RN.Text,P=RN.Pressable||RN.TouchableOpacity||V,SV=RN.ScrollView||V;
  const tabs=storage.tabs||[],active=storage.activeTabUid;
- const topPad=storage.statusBarSpacing&&RN.Platform?.OS==="android"?Number(RN.StatusBar?.currentHeight||0):0;
+ const systemPad=storage.statusBarSpacing&&RN.Platform?.OS==="android"?Number(RN.StatusBar?.currentHeight||0):0;
+ const manualOffset=Math.max(0,Math.min(20,Number(storage.barTopOffset)||0));
+ const topPad=systemPad+manualOffset;
  const compact=!!storage.compact;
  const s={
   outer:{paddingTop:topPad,backgroundColor:"#111214",borderBottomWidth:1,borderBottomColor:"#26272b"},
@@ -760,7 +763,11 @@ function Settings(){
  return React.createElement(SV,{contentContainerStyle:s.root},
   React.createElement(T,{style:s.h},"ChannelTabs"),
   React.createElement(V,{style:s.c},
-   row("Üst sekme çubuğu aktif","enabled"),row("Sekmede × göster","showClose"),row("Okunmamış noktası","showUnread"),row("Mention sayısı","showMentions"),row("+ düğmesi","showPlus"),row("Son kanalları göster","showRecents"),row("Kompakt sekmeler","compact"),row("Dokununca titreşim","haptic"),row("Kanal/DM uzun basma seçenekleri","longPressActions"),row("Android durum çubuğu boşluğu","statusBarSpacing")
+   row("Üst sekme çubuğu aktif","enabled"),row("Sekmede × göster","showClose"),row("Okunmamış noktası","showUnread"),row("Mention sayısı","showMentions"),row("+ düğmesi","showPlus"),row("Son kanalları göster","showRecents"),row("Kompakt sekmeler","compact"),row("Dokununca titreşim","haptic"),row("Kanal/DM uzun basma seçenekleri","longPressActions"),row("Android durum çubuğu boşluğu","statusBarSpacing"),
+   React.createElement(T,{style:st.t},"Sekme çubuğunu aşağı kaydır"),
+   React.createElement(V,{style:{flexDirection:"row",gap:6,flexWrap:"wrap"}},
+    ...[0,2,4,6,8].map(px=>btn(`${px}px`,()=>S("barTopOffset",px),Number(storage.barTopOffset||0)===px))
+   )
   ),
   React.createElement(V,{style:s.c},
    React.createElement(T,{style:s.t},"Normal kanal/DM'ye dokununca"),
