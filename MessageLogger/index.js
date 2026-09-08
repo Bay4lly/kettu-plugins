@@ -2,7 +2,7 @@
 "use strict";
 
 /*
- * Kettu MessageLogger v4.2.0
+ * Kettu MessageLogger v4.3.0
  * Author: bay4lly
  *
  * Safe DCDChat implementation:
@@ -29,6 +29,7 @@ const edits=new Map();         // channel:id -> [{content, after, time}]
 const rawCurrent=new Map();    // channel:id -> real current content
 const lastEditEvent=new Map(); // channel:id -> dedupe info
 const whiteOverrides=new Set();// user chose "Beyaz göster"
+const nativeOriginals=new Map();// channel:id -> original DCDChat numeric colours/highlight
 
 let Flux=null;
 let MessageStore=null;
@@ -362,6 +363,125 @@ function unpatchRow(){
 }
 
 
+
+function collectExistingNumericColors(root){
+ const list=[];
+ const seen=new WeakSet();
+
+ function walk(v,depth,path){
+  if(!v||typeof v!=="object"||depth>4||seen.has(v))return;
+  seen.add(v);
+
+  for(const name of Object.keys(v)){
+   let value;
+   try{value=v[name]}catch{continue}
+
+   const next=path?`${path}.${name}`:name;
+
+   if(/color/i.test(name)&&typeof value==="number"){
+    list.push({path:next,value});
+    continue;
+   }
+
+   if(value&&typeof value==="object"&&!Array.isArray(value)){
+    walk(value,depth+1,next);
+   }
+  }
+ }
+
+ walk(root,0,"");
+ return list;
+}
+
+function getPath(root,path){
+ const parts=String(path||"").split(".").filter(Boolean);
+ let cur=root;
+ for(const p of parts){
+  if(!cur||typeof cur!=="object")return undefined;
+  cur=cur[p];
+ }
+ return cur;
+}
+
+function setPath(root,path,value){
+ const parts=String(path||"").split(".").filter(Boolean);
+ if(!parts.length)return false;
+ let cur=root;
+
+ for(let i=0;i<parts.length-1;i++){
+  const p=parts[i];
+  if(!cur||typeof cur!=="object"||!cur[p]||typeof cur[p]!=="object")return false;
+  cur=cur[p];
+ }
+
+ try{
+  cur[parts[parts.length-1]]=value;
+  return true;
+ }catch{
+  return false;
+ }
+}
+
+function captureNativeOriginal(key,ret){
+ if(!key||!ret||typeof ret!=="object"||nativeOriginals.has(key))return;
+
+ try{
+  const highlight=ret.backgroundHighlight;
+  nativeOriginals.set(key,{
+   messageColors:collectExistingNumericColors(ret.message||{}),
+   highlight:{
+    existed:!!highlight,
+    backgroundColor:highlight?.backgroundColor,
+    gutterColor:highlight?.gutterColor,
+    hadBackgroundColor:!!highlight&&Object.prototype.hasOwnProperty.call(highlight,"backgroundColor"),
+    hadGutterColor:!!highlight&&Object.prototype.hasOwnProperty.call(highlight,"gutterColor")
+   }
+  });
+  diag.originalCaptures++;
+ }catch(e){
+  fail("captureNativeOriginal",e);
+ }
+}
+
+function restoreNativeOriginal(key,ret){
+ const snap=key?nativeOriginals.get(key):null;
+ if(!snap||!ret||typeof ret!=="object")return false;
+
+ try{
+  for(const entry of snap.messageColors||[]){
+   setPath(ret.message,entry.path,entry.value);
+  }
+
+  const h=snap.highlight;
+  if(h){
+   if(h.existed){
+    ret.backgroundHighlight=ret.backgroundHighlight??{};
+    if(h.hadBackgroundColor)ret.backgroundHighlight.backgroundColor=h.backgroundColor;
+    else{
+     try{delete ret.backgroundHighlight.backgroundColor}catch{}
+    }
+    if(h.hadGutterColor)ret.backgroundHighlight.gutterColor=h.gutterColor;
+    else{
+     try{delete ret.backgroundHighlight.gutterColor}catch{}
+    }
+   }else if(ret.backgroundHighlight){
+    // We created the highlight purely for MessageLogger. Remove it when user asks
+    // for white/original appearance. If deletion is blocked, remove just our fields.
+    try{delete ret.backgroundHighlight}catch{
+     try{delete ret.backgroundHighlight.backgroundColor}catch{}
+     try{delete ret.backgroundHighlight.gutterColor}catch{}
+    }
+   }
+  }
+
+  diag.whiteRestores++;
+  return true;
+ }catch(e){
+  fail("restoreNativeOriginal",e);
+  return false;
+ }
+}
+
 function paintExistingNumericColors(root,nativeColor){
  let changed=0;
  const seen=new WeakSet();
@@ -489,10 +609,16 @@ function installRow(forceLast=false){
    const isDeleted=!!msg.__kml_deleted || !!(key&&deleted.has(key));
    if(!isDeleted)return ret;
 
-   if(key && whiteOverrides.has(key))return ret;
-
    ret.message=ret.message??{};
+   captureNativeOriginal(key,ret);
+
+   // Keep the native "(deleted)" indicator in both red and white modes.
    ret.message.edited="deleted";
+
+   if(key && whiteOverrides.has(key)){
+    restoreNativeOriginal(key,ret);
+    return ret;
+   }
 
    if(storage.deletedStyle==="overlay"){
     if(applyOverlaySafe(ret)){
@@ -742,7 +868,11 @@ function installLongPress(){
        if(white)whiteOverrides.delete(key);
        else whiteOverrides.add(key);
        try{LazyActionSheet.hideActionSheet?.()}catch{}
+       // RowManager may cache the exact native result object. Re-arm and invalidate
+       // twice so the restore/red pass runs against the cached row as well.
+       installRow(true);
        refresh(ch,id);
+       setTimeout(()=>refresh(ch,id),220);
       }
      }));
     });
@@ -772,6 +902,7 @@ function clearSession(){
  rawCurrent.clear();
  lastEditEvent.clear();
  whiteOverrides.clear();
+ nativeOriginals.clear();
 }
 
 function Settings(){
@@ -904,7 +1035,11 @@ return {
   edits,
   rawCurrent,
   paintExistingNumericColors,
-  applyOverlaySafe
+  applyOverlaySafe,
+  captureNativeOriginal,
+  restoreNativeOriginal,
+  nativeOriginals,
+  whiteOverrides
  }
 };
 
