@@ -1,13 +1,13 @@
 {
   "name": "Kettu AccountSwitcher+",
-  "description": "Discord mobil ayarlarında Çıkış Yap'ın altına PC/web tarzı Hesap Değiştir ekler; kullanılan hesapları otomatik hatırlar ve hızlı geçiş sağlar.",
+  "description": "Discord mobilde Çıkış Yap'ın altına PC/web tarzı Hesap Değiştir ekler. Mevcut hesaptan çıkmadan e-posta/şifre ile yeni hesap ekleme ve hızlı hesap geçişi.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "8cf94bdc931073ff1329c511541e43ecbc735cbdd533b179e42afd352495a50f",
+  "hash": "ec78502fd39a8453b23dcd84bd2a6aec4bcb1d81e73fee8317e27cee752e05ed",
   "vendetta": {
     "icon": "ic_switch_account_24px"
   }
