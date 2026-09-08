@@ -1,6 +1,6 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
-/* Kettu ChannelTabs v3.1.0 - global Chrome-like persistent top tabs for Discord mobile */
+/* Kettu ChannelTabs v3.2.0 - global Chrome-like persistent top tabs for Discord mobile */
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
@@ -12,6 +12,9 @@ let ChannelStore=null,SelectedChannelStore=null,UserStore=null,GuildStore=null,R
 let ChannelRouter=null,Nav=null,Flux=null,LazyActionSheet=null,ActionSheetRow=null;
 let rootInstalled=false,rootHookName="",sheetInstalled=false,watcher=null,lastObservedId="",navIntent=null;
 let rootChoice=null,rootRank=999,rootBypass=0,globalRootSeen=false;
+let modalState=null;
+const rootDiscoveryUnpatches=[];
+const RootContext=React?.createContext?.(false)||null;
 const rootRefs=new Set(),rootWrappers=new WeakMap(),fallbackPatched=new Set();
 
 const diag={
@@ -26,6 +29,8 @@ function err(where,e){
 function toast(s){try{ui?.showToast?.(String(s))}catch{}}
 function emit(){for(const fn of [...listeners]){try{fn()}catch{}}}
 function subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn)}
+function setModal(v){modalState=v||null;emit()}
+function closeModal(){setModal(null)}
 function uid(){return `kct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`}
 
 function defaults(){
@@ -43,7 +48,7 @@ function defaults(){
   showRecents:true,
   compact:false,
   haptic:true,
-  statusBarSpacing:true,
+  statusBarSpacing:false,
   longPressActions:true,
   restoreTabs:true,
   focusExistingOnNew:true
@@ -325,16 +330,100 @@ function TabsBar(){
  );
 }
 
+function TabsOverlay(){
+ if(!React||!RN.View||!RN.Text)return null;
+ useRefresh();
+ if(!modalState)return null;
+
+ const V=RN.View,T=RN.Text,P=RN.Pressable||RN.TouchableOpacity||V,SV=RN.ScrollView||V,Modal=RN.Modal;
+ const type=modalState.type;
+ const tab=type==="tab"?(storage.tabs||[]).find(t=>t.uid===modalState.uid):null;
+ const recents=storage.showRecents?(storage.recent||[]):[];
+
+ const s={
+  fallback:{position:"absolute",left:0,right:0,top:0,bottom:0,zIndex:99999,elevation:99999},
+  backdrop:{flex:1,backgroundColor:"#00000088",justifyContent:"flex-end"},
+  card:{maxHeight:"72%",backgroundColor:"#1e1f22",borderTopLeftRadius:18,borderTopRightRadius:18,padding:16,paddingBottom:28,gap:9},
+  h:{fontSize:20,fontWeight:"700",color:"#f2f3f5"},
+  sub:{fontSize:12,color:"#b5bac1",marginBottom:4},
+  row:{flexDirection:"row",alignItems:"center",padding:10,borderRadius:10,backgroundColor:"#2b2d31",gap:8},
+  info:{flex:1},name:{color:"#f2f3f5",fontSize:15,fontWeight:"600"},meta:{color:"#949ba4",fontSize:11,marginTop:2},
+  btn:{paddingVertical:8,paddingHorizontal:10,borderRadius:8,backgroundColor:"#404249"},
+  blue:{backgroundColor:"#5865f2"},danger:{backgroundColor:"#4b252a"},
+  bt:{color:"#fff",fontSize:12,fontWeight:"700"},action:{padding:12,borderRadius:9,backgroundColor:"#2b2d31"},
+  actionText:{color:"#fff",fontSize:14,fontWeight:"600"}
+ };
+
+ const close=()=>closeModal();
+
+ let body=null;
+ if(type==="recent"){
+  body=React.createElement(
+   React.Fragment,null,
+   React.createElement(T,{style:s.h},"Yeni Sekme"),
+   React.createElement(T,{style:s.sub},"Son açtığın kanal veya DM'yi bu sekmede aç ya da yeni sekme oluştur."),
+   React.createElement(SV,{style:{maxHeight:430},contentContainerStyle:{gap:8},keyboardShouldPersistTaps:"handled"},
+    ...(recents.length?recents.map(r=>{
+     const c=channel(r.channelId),label=c?nameOf(c):r.name;
+     return React.createElement(V,{key:r.channelId,style:s.row},
+      React.createElement(V,{style:s.info},
+       React.createElement(T,{style:s.name,numberOfLines:1},`${r.kind==="dm"?"@":r.kind==="group"?"◉":"#"} ${label}`),
+       React.createElement(T,{style:s.meta,numberOfLines:1},r.guildId?guildName(r.guildId)||"Sunucu kanalı":"DM")
+      ),
+      React.createElement(P,{style:s.btn,onPress:()=>{close();if(c)openChannel(c,"current",true)}},React.createElement(T,{style:s.bt},"Bu sekme")),
+      React.createElement(P,{style:[s.btn,s.blue],onPress:()=>{close();if(c)openChannel(c,"new",true)}},React.createElement(T,{style:s.bt},"Yeni"))
+     )
+    }):[React.createElement(T,{key:"none",style:s.sub},"Henüz son kanal yok.")])
+   )
+  );
+ }else if(type==="tab"&&tab){
+  const action=(label,fn,danger)=>React.createElement(P,{key:label,style:[s.action,danger&&s.danger],onPress:()=>{close();fn()}},React.createElement(T,{style:s.actionText},label));
+  body=React.createElement(React.Fragment,null,
+   React.createElement(T,{style:s.h},tab.name||"Sekme"),
+   action("Bu sekmeyi yeniden aç",()=>goTab(tab)),
+   action("Aynı kanalı yeni sekmede aç",()=>{const c=channel(tab.channelId);if(c){const old=storage.focusExistingOnNew;storage.focusExistingOnNew=false;addNewTab(c,true,true);storage.focusExistingOnNew=old}}),
+   action("Diğer sekmeleri kapat",()=>closeOthers(tab.uid)),
+   action("Sağdaki sekmeleri kapat",()=>closeRight(tab.uid)),
+   action("Sekmeyi kapat",()=>closeTab(tab.uid),true)
+  );
+ }else{
+  body=React.createElement(T,{style:s.sub},"Menü verisi bulunamadı.");
+ }
+
+ const panel=React.createElement(P,{style:s.backdrop,onPress:close},
+  React.createElement(P,{style:s.card,onPress:e=>{try{e?.stopPropagation?.()}catch{}}},body)
+ );
+
+ if(Modal){
+  return React.createElement(Modal,{
+   transparent:true,visible:true,animationType:"fade",statusBarTranslucent:true,
+   onRequestClose:close
+  },panel);
+ }
+ return React.createElement(V,{style:s.fallback},panel);
+}
+
+function stopRootDiscovery(){
+ while(rootDiscoveryUnpatches.length){
+  try{rootDiscoveryUnpatches.pop()?.()}catch{}
+ }
+}
+
 function RootShell({content,global=false}){
  if(!storage.enabled)return content;
  if(global){globalRootSeen=true;diag.globalRoot=true;}
  const V=RN.View;
- if(!V)return React.createElement(React.Fragment,null,React.createElement(TabsBar),content);
- // Real layout row, not a floating ActionSheet/Modal. It permanently reserves
- // space at the top so Discord cannot draw over the tabs during navigation.
+ React.useEffect?.(()=>{
+  // The root wrapper is already mounted. Continuing to hook every JSX/createElement
+  // call buys us nothing and can destabilise Discord.
+  const t=setTimeout(stopRootDiscovery,0);
+  return()=>clearTimeout(t);
+ },[]);
+ if(!V)return React.createElement(React.Fragment,null,React.createElement(TabsBar),content,React.createElement(TabsOverlay));
  return React.createElement(V,{style:{flex:1,backgroundColor:"#111214"},__kctRoot:true},
   React.createElement(TabsBar),
-  React.createElement(V,{style:{flex:1,minHeight:0},__kctDiscordContent:true},content)
+  React.createElement(V,{style:{flex:1,minHeight:0},__kctDiscordContent:true},content),
+  React.createElement(TabsOverlay)
  );
 }
 
@@ -343,205 +432,118 @@ function typeName(type){
 }
 function discoverRootRefs(){
  const add=(x)=>{if(x&&(typeof x==="function"||typeof x==="object"))rootRefs.add(x)};
- for(const prop of [
-  "NavigationContainer","BaseNavigationContainer","SafeAreaProvider","GestureHandlerRootView",
-  "AppNavigationContainer","AppNavigationContainerOrEmpty","PortalProviderComponent",
-  "RootThemeContextProvider","BackgroundOrForegroundApp"
- ]){
+ for(const prop of ["NavigationContainer","BaseNavigationContainer","AppNavigationContainer","AppNavigationContainerOrEmpty"]){
   try{const m=M.findByProps?.(prop);add(m?.[prop])}catch{}
  }
 }
 function candidateRank(type,props){
- if(rootRefs.has(type)){
-  const n=typeName(type);
-  if(/NavigationContainer|AppNavigationContainer/i.test(n))return 1;
-  if(/BackgroundOrForegroundApp|AppContainer/i.test(n))return 2;
-  if(/SafeAreaProvider|GestureHandlerRootView|PortalProvider/i.test(n))return 4;
-  return 3;
- }
+ if(rootRefs.has(type))return 1;
  const n=typeName(type);
- if(!n)return 999;
  if(/^(NavigationContainer|BaseNavigationContainer|NavigationContainerInner|AppNavigationContainer|AppNavigationContainerOrEmpty)$/i.test(n))return 1;
- if(/^(App|AppRoot|Root|RootComponent|DiscordApp|BackgroundOrForegroundApp|AppContainer|RootNavigator|RootStack|RootStackNavigator)$/i.test(n))return 2;
- if(/^(RootThemeContextProvider|PortalProviderComponent|GestureWrapper|AccessibilityPreferencesContextProvider)$/i.test(n))return 3;
- if(/SafeAreaProvider|GestureHandlerRootView|SafeAreaWrapper/i.test(n))return 4;
- if(/^(StackNavigator|NativeStackNavigator|ChatPanelNativeStackNavigator|LaunchPadContainer)$/i.test(n))return 5;
- if(/^(MainTabs|TabsNavigator|MainTabsNavigator|MainTabsNavigatorPanel|MainTabsChannelScreenStack)$/i.test(n))return 7;
- if(props&&typeof props==="object"){
-  let score=0;
-  if("onReady" in props)score++;
-  if("onStateChange" in props)score++;
-  if("initialState" in props)score++;
-  if("linking" in props)score++;
-  if("theme" in props)score++;
-  if(score>=3)return 2;
- }
  return 999;
 }
-function chooseRoot(type,rank){
- if(!type||rank>=999)return;
- if(!rootChoice||rank<rootRank){
-  rootChoice=type;rootRank=rank;rootInstalled=true;
-  rootHookName=`global:${typeName(type)||"anonymous"}@${rank}`;
-  diag.root=true;diag.rootHook=rootHookName;emit();
- }
+function chooseRoot(type){
+ if(rootChoice||!type)return;
+ rootChoice=type;rootRank=1;rootInstalled=true;
+ rootHookName=`global:${typeName(type)||"NavigationRoot"}`;
+ diag.root=true;diag.rootHook=rootHookName;emit();
 }
 function wrapperFor(type){
  if(rootWrappers.has(type))return rootWrappers.get(type);
  const Original=type;
- function KettuChannelTabsGlobalRoot(props){
+ function KettuChannelTabsSingleRoot(props){
+  const inside=RootContext&&React?.useContext?!!React.useContext(RootContext):false;
   let child;
   rootBypass++;
   try{child=React.createElement(Original,props)}finally{rootBypass--}
-  if(rootChoice!==Original)return child;
-  return React.createElement(RootShell,{content:child,global:true});
+  if(inside||rootChoice!==Original)return child;
+  const shell=React.createElement(RootShell,{content:child,global:true});
+  return RootContext?React.createElement(RootContext.Provider,{value:true},shell):shell;
  }
- KettuChannelTabsGlobalRoot.displayName=`KettuChannelTabsGlobal_${typeName(type)||"Root"}`;
- rootWrappers.set(type,KettuChannelTabsGlobalRoot);
- return KettuChannelTabsGlobalRoot;
+ KettuChannelTabsSingleRoot.displayName=`KettuChannelTabsSingle_${typeName(type)||"Root"}`;
+ rootWrappers.set(type,KettuChannelTabsSingleRoot);
+ return KettuChannelTabsSingleRoot;
 }
 function inspectElementArgs(args){
  try{
-  if(rootBypass>0||!storage.enabled)return;
+  if(rootBypass>0||!storage.enabled||rootChoice)return;
   const type=args?.[0],props=args?.[1];
-  if(!type||type===RootShell||type===TabsBar)return;
-  const n=typeName(type);
-  if(/^KettuChannelTabs/.test(n))return;
-  const rank=candidateRank(type,props);
-  if(rank>=999)return;
-  chooseRoot(type,rank);
-  // Only replace the chosen exact type. Lower-quality candidates keep rendering
-  // untouched, preventing nested duplicate tab bars.
-  if(rootChoice===type)args[0]=wrapperFor(type);
+  if(!type||type===RootShell||type===TabsBar||type===TabsOverlay)return;
+  if(candidateRank(type,props)!==1)return;
+  chooseRoot(type);
+  args[0]=wrapperFor(type);
  }catch(e){err("inspectRoot",e)}
 }
 function installGlobalElementHooks(){
  try{
+  if(rootDiscoveryUnpatches.length)return true;
   discoverRootRefs();
   if(React&&typeof React.createElement==="function"){
-   unpatches.push(patcher.before("createElement",React,inspectElementArgs));diag.jsxHooks++;
+   rootDiscoveryUnpatches.push(patcher.before("createElement",React,inspectElementArgs));diag.jsxHooks++;
   }
   const jsx=M.findByProps?.("jsx","jsxs");
-  if(jsx){for(const m of ["jsx","jsxs"]){if(typeof jsx[m]==="function"){unpatches.push(patcher.before(m,jsx,inspectElementArgs));diag.jsxHooks++;}}}
+  if(jsx){
+   for(const m of ["jsx","jsxs"])if(typeof jsx[m]==="function"){
+    rootDiscoveryUnpatches.push(patcher.before(m,jsx,inspectElementArgs));diag.jsxHooks++;
+   }
+  }
   const dev=M.findByProps?.("jsxDEV");
-  if(typeof dev?.jsxDEV==="function"){unpatches.push(patcher.before("jsxDEV",dev,inspectElementArgs));diag.jsxHooks++;}
-  return diag.jsxHooks>0;
+  if(typeof dev?.jsxDEV==="function"){
+   rootDiscoveryUnpatches.push(patcher.before("jsxDEV",dev,inspectElementArgs));diag.jsxHooks++;
+  }
+  return rootDiscoveryUnpatches.length>0;
  }catch(e){err("globalHooks",e);return false}
 }
-function patchFallbackScreen(name){
- if(fallbackPatched.has(name))return false;
- try{
-  // Named-export modules can be patched directly.
-  const named=M.findByProps?.(name);
-  if(named&&typeof named[name]==="function"){
-   fallbackPatched.add(name);
-   unpatches.push(patcher.after(name,named,(_,res)=>{
-    try{
-     if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
-     diag.root=true;diag.rootHook=`fallback:${name}`;rootHookName=diag.rootHook;
-     return React.createElement(RootShell,{content:res,global:false});
-    }catch(e){err(`fallback:${name}`,e);return res}
-   }));
-   diag.fallbackRoots++;emit();return true;
-  }
-  // Some Discord modules expose a default export object instead.
-  const mod=M.findByName?.(name,false);
-  if(mod&&typeof mod.default==="function"){
-   fallbackPatched.add(name);
-   unpatches.push(patcher.after("default",mod,(_,res)=>{
-    try{
-     if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
-     diag.root=true;diag.rootHook=`fallback:${name}`;rootHookName=diag.rootHook;
-     return React.createElement(RootShell,{content:res,global:false});
-    }catch(e){err(`fallback:${name}`,e);return res}
-   }));
-   diag.fallbackRoots++;emit();return true;
-  }
-  // Class components are patchable through prototype.render even when findByName
-  // returns the component itself.
-  if(typeof mod==="function"&&typeof mod.prototype?.render==="function"){
-   fallbackPatched.add(name);
-   unpatches.push(patcher.after("render",mod.prototype,(_,res)=>{
-    try{
-     if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
-     diag.root=true;diag.rootHook=`fallback:${name}`;rootHookName=diag.rootHook;
-     return React.createElement(RootShell,{content:res,global:false});
-    }catch(e){err(`fallback:${name}`,e);return res}
-   }));
-   diag.fallbackRoots++;emit();return true;
-  }
- }catch(e){err(`patchFallback:${name}`,e)}
+function patchOneFallback(){
+ if(globalRootSeen||rootChoice)return false;
+ for(const name of ["AppNavigationContainer","AppNavigationContainerOrEmpty","BackgroundOrForegroundApp","AppContainer","MainTabs"]){
+  if(fallbackPatched.has(name))continue;
+  try{
+   const named=M.findByProps?.(name);
+   if(named&&typeof named[name]==="function"){
+    fallbackPatched.add(name);
+    unpatches.push(patcher.after(name,named,(_,res)=>{
+     try{
+      if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+      diag.root=true;diag.rootHook=`fallback:${name}`;
+      return React.createElement(RootShell,{content:res,global:false});
+     }catch(e){err(`fallback:${name}`,e);return res}
+    }));
+    diag.fallbackRoots++;emit();return true;
+   }
+   const mod=M.findByName?.(name,false);
+   if(mod&&typeof mod.default==="function"){
+    fallbackPatched.add(name);
+    unpatches.push(patcher.after("default",mod,(_,res)=>{
+     try{
+      if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+      diag.root=true;diag.rootHook=`fallback:${name}`;
+      return React.createElement(RootShell,{content:res,global:false});
+     }catch(e){err(`fallback:${name}`,e);return res}
+    }));
+    diag.fallbackRoots++;emit();return true;
+   }
+  }catch(e){err(`fallback:${name}`,e)}
+ }
  return false;
 }
 function installRoot(){
- discoverRootRefs();
- if(diag.jsxHooks===0)installGlobalElementHooks();
- // Names seen in real Discord Android component stacks, highest-level first.
- // We try broad app/navigation roots before chat-only screens so the strip stays
- // present in settings, DMs, guild channels and other routes.
- const primary=[
-  "BackgroundOrForegroundApp","App","AppContainer","AppNavigationContainerOrEmpty",
-  "AppNavigationContainer","NavigationContainerInner","RootThemeContextProvider",
-  "PortalProviderComponent","GestureWrapper","SafeAreaWrapper"
- ];
- let primaryPatched=false;
- for(const n of primary){if(patchFallbackScreen(n)){primaryPatched=true;break}}
- if(!primaryPatched){
-  for(const n of [
-   "StackNavigator","NativeStackNavigator","ChatPanelNativeStackNavigator","LaunchPadContainer",
-   "MainTabs","MainTabsNavigatorPanel","MainTabsChannelScreenStack","TabsNavigator",
-   "FirstChannelScreen","StandaloneChannelScreen","SettingsOverviewScreen",
-   "UserSettingsOverviewScreen","SettingsScreen","ChannelScreen","Messages"
-  ]){
-   if(patchFallbackScreen(n))break;
+ installGlobalElementHooks();
+ // IMPORTANT: no fallback is installed at the same time as the global hook.
+ // Give the real navigation root time to mount first. This fixes the duplicate
+ // top bars shown in Discord 343.x.
+ timers.push(setTimeout(()=>{
+  if(!globalRootSeen&&!rootChoice){
+   stopRootDiscovery();
+   patchOneFallback();
   }
- }
-}
-function sheetHide(key){try{LazyActionSheet?.hideActionSheet?.(key)}catch{try{LazyActionSheet?.hideActionSheet?.()}catch{}}}
-function openSheet(key,Comp){
- try{
-  LazyActionSheet=LazyActionSheet||M.findByProps?.("openLazy","hideActionSheet");
-  if(!LazyActionSheet?.openLazy)throw new Error("ActionSheet bulunamadı");
-  LazyActionSheet.openLazy(Promise.resolve({default:Comp}),key,{});
- }catch(e){err("openSheet",e);toast("Menü açılamadı")}
+ },3000));
 }
 
-function RecentSheet(){
- useRefresh();
- const V=RN.View,T=RN.Text,SV=RN.ScrollView||V,P=RN.Pressable||RN.TouchableOpacity||V;
- const recents=storage.showRecents?(storage.recent||[]):[];
- const s={root:{padding:16,paddingBottom:28,gap:8},h:{fontSize:21,fontWeight:"700",color:"#f2f3f5"},sub:{fontSize:12,color:"#b5bac1",marginBottom:5},row:{flexDirection:"row",alignItems:"center",padding:10,borderRadius:10,backgroundColor:"#2b2d31",gap:8},info:{flex:1},name:{color:"#f2f3f5",fontSize:15,fontWeight:"600"},meta:{color:"#949ba4",fontSize:11,marginTop:2},btn:{paddingVertical:7,paddingHorizontal:9,borderRadius:7,backgroundColor:"#404249"},newBtn:{backgroundColor:"#5865f2"},bt:{color:"#fff",fontSize:12,fontWeight:"600"},empty:{color:"#949ba4",fontSize:13,padding:12}};
- return React.createElement(SV,{contentContainerStyle:s.root},
-  React.createElement(T,{style:s.h},"Yeni Sekme"),
-  React.createElement(T,{style:s.sub},"Son açtığın kanal veya DM'yi bu sekmede aç ya da yeni bir sekme oluştur."),
-  ...(recents.length?recents.map(r=>{
-   const c=channel(r.channelId);const label=c?nameOf(c):r.name;
-   return React.createElement(V,{key:r.channelId,style:s.row},
-    React.createElement(V,{style:s.info},React.createElement(T,{style:s.name,numberOfLines:1},`${r.kind==="dm"?"@":r.kind==="group"?"◉":"#"} ${label}`),React.createElement(T,{style:s.meta,numberOfLines:1},r.guildId?guildName(r.guildId)||"Sunucu kanalı":"DM")),
-    React.createElement(P,{style:s.btn,onPress:()=>{if(c){sheetHide("kct-recent");openChannel(c,"current",true)}}},React.createElement(T,{style:s.bt},"Bu sekme")),
-    React.createElement(P,{style:[s.btn,s.newBtn],onPress:()=>{if(c){sheetHide("kct-recent");openChannel(c,"new",true)}}},React.createElement(T,{style:s.bt},"Yeni"))
-   )
-  }):[React.createElement(T,{key:"empty",style:s.empty},"Henüz son kanal yok.")])
- );
-}
-function openRecentSheet(){haptic();openSheet("kct-recent",RecentSheet)}
+function openRecentSheet(){haptic();setModal({type:"recent"})}
+function openTabMenu(tab){haptic();if(tab?.uid)setModal({type:"tab",uid:tab.uid})}
 
-function TabMenuSheetFactory(tab){
- return function TabMenuSheet(){
-  const V=RN.View,T=RN.Text,P=RN.Pressable||RN.TouchableOpacity||V;
-  const s={root:{padding:16,paddingBottom:28,gap:8},h:{fontSize:20,fontWeight:"700",color:"#fff",marginBottom:4},b:{padding:12,borderRadius:9,backgroundColor:"#2b2d31"},danger:{backgroundColor:"#3b2428"},bt:{color:"#fff",fontSize:14,fontWeight:"600"}};
-  const act=(label,fn,danger)=>React.createElement(P,{style:[s.b,danger&&s.danger],onPress:()=>{sheetHide("kct-tab-menu");fn()}},React.createElement(T,{style:s.bt},label));
-  return React.createElement(V,{style:s.root},React.createElement(T,{style:s.h},tab.name||"Sekme"),
-   act("Bu sekmeyi yeniden aç",()=>goTab(tab)),
-   act("Aynı kanalı yeni sekmede aç",()=>{const c=channel(tab.channelId);if(c){const old=storage.focusExistingOnNew;storage.focusExistingOnNew=false;addNewTab(c,true,true);storage.focusExistingOnNew=old}}),
-   act("Diğer sekmeleri kapat",()=>closeOthers(tab.uid)),
-   act("Sağdaki sekmeleri kapat",()=>closeRight(tab.uid)),
-   act("Sekmeyi kapat",()=>closeTab(tab.uid),true)
-  );
- }
-}
-function openTabMenu(tab){haptic();openSheet("kct-tab-menu",TabMenuSheetFactory(tab))}
-
+function hideNativeSheet(key){try{LazyActionSheet?.hideActionSheet?.(key)}catch{try{LazyActionSheet?.hideActionSheet?.()}catch{}}}
 function findRows(root){
  const seen=new WeakSet();let budget=1600;
  function walk(v,d){
@@ -579,15 +581,17 @@ function installLongPressSheet(){
   if(!LazyActionSheet?.openLazy||!ActionSheetRow)return;
   unpatches.push(patcher.before("openLazy",LazyActionSheet,([component,key,props])=>{
    try{
-    if(!storage.longPressActions||String(key||"").startsWith("kct-")||/MessageLongPress/i.test(String(key||"")))return;
+    const sk=String(key||"");
+    if(!storage.longPressActions||sk.startsWith("kct-")||/MessageLongPress/i.test(sk))return;
+    if(!/(Channel|Private|DM|Conversation|Recipient|User).*?(LongPress|ActionSheet)|LongPress.*?(Channel|DM|User)/i.test(sk))return;
     const c=resolveSheetChannel(props);if(!c?.id||!component?.then)return;
     component.then(mod=>{
      if(typeof mod?.default!=="function")return;
      const u=patcher.after("default",mod,(_,tree)=>{
       setTimeout(()=>{try{u()}catch{}},0);
       const rows=findRows(tree);if(!rows||rows.some(r=>r?.props?.__kctOpenMode))return;
-      const newRow=React.createElement(ActionSheetRow,{key:"kct-new",__kctOpenMode:true,label:"↗ Yeni sekmede aç",onPress:()=>{sheetHide(key);openChannel(c,"new",true)}});
-      const curRow=React.createElement(ActionSheetRow,{key:"kct-current",__kctOpenMode:true,label:"↪ Bu sekmede aç",onPress:()=>{sheetHide(key);openChannel(c,"current",true)}});
+      const newRow=React.createElement(ActionSheetRow,{key:"kct-new",__kctOpenMode:true,label:"↗ Yeni sekmede aç",onPress:()=>{hideNativeSheet(key);openChannel(c,"new",true)}});
+      const curRow=React.createElement(ActionSheetRow,{key:"kct-current",__kctOpenMode:true,label:"↪ Bu sekmede aç",onPress:()=>{hideNativeSheet(key);openChannel(c,"current",true)}});
       rows.splice(Math.min(1,rows.length),0,newRow,curRow);
      });
     }).catch?.(()=>{});
@@ -599,7 +603,7 @@ function installLongPressSheet(){
 
 function installWatcher(){
  if(watcher)return;
- watcher=setInterval(()=>observeCurrent(false),350);diag.watcher=true;
+ watcher=setInterval(()=>observeCurrent(false),700);diag.watcher=true;
  if(Flux&&typeof Flux.dispatch==="function"){
   unpatches.push(patcher.after("dispatch",Flux,([a])=>{
    const type=String(a?.type||"");
@@ -657,7 +661,7 @@ function onUnload(){
  if(watcher)clearInterval(watcher);watcher=null;
  for(const t of timers)clearTimeout(t);timers.length=0;
  while(unpatches.length){try{unpatches.pop()?.()}catch{}}
- listeners.clear();rootInstalled=false;sheetInstalled=false;rootChoice=null;rootRank=999;globalRootSeen=false;rootRefs.clear();fallbackPatched.clear();
+ stopRootDiscovery();closeModal();listeners.clear();rootInstalled=false;sheetInstalled=false;rootChoice=null;rootRank=999;globalRootSeen=false;rootRefs.clear();fallbackPatched.clear();
 }
 
 return {onLoad,onUnload,settings:Settings,__test:{kindOf,nameOf,descriptor,tabFrom,unreadInfo,candidateRank,typeName}};
