@@ -1,13 +1,13 @@
 {
   "name": "Kettu MessageLogger",
-  "description": "Discord 343.x uyumlu silinen/editlenen mesaj logger. Mevcut DCDChat numeric renk alanlarını güvenli boyar ve gerektiğinde overlay fallback kullanır.",
+  "description": "Silinen mesajlar için kırmızı/overlay ve güvenilir Beyaz göster restore desteği; edit geçmişi ve DCDChat güvenli renk yönetimi.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "4.2.0",
+  "hash": "4.3.0",
   "vendetta": {
     "icon": "ic_message_edit_24px"
   }
