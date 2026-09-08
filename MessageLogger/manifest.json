@@ -1,13 +1,13 @@
 {
   "name": "Kettu MessageLogger",
-  "description": "Silinen mesajları mobil DCDChat üzerinde kırmızı/overlay gösterir ve düzenleme geçmişini tekilleştirerek mesajın üstünde gösterir.",
+  "description": "Silinen mesajları güvenli DCDChat yolu ile kırmızı/overlay gösterir; düzenleme geçmişini gerçek Discord MessageRecord kullanarak mesajın üstünde gösterir.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "83ae249b87e485d4ce370dd5dfe605ccbc6de165626a93448ec0ca3dc9c62745",
+  "hash": "4.0.0",
   "vendetta": {
     "icon": "ic_message_edit_24px"
   }
