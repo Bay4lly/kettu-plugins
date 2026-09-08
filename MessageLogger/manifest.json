@@ -1,13 +1,13 @@
 {
   "name": "Kettu MessageLogger",
-  "description": "Silinen mesajları güvenli DCDChat yolu ile kırmızı/overlay gösterir; düzenleme geçmişini gerçek Discord MessageRecord kullanarak mesajın üstünde gösterir.",
+  "description": "Discord 343.12 DCDChat ile uyumlu MessageLogger. Silinen mesaj rengini native integer renkle gösterir; edit geçmişini güvenli MessageRecord ile işler.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "4.0.0",
+  "hash": "4.1.0",
   "vendetta": {
     "icon": "ic_message_edit_24px"
   }
