@@ -1,6 +1,6 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
-/* Kettu ChannelTabs v2.0.0 - Chrome-like persistent top tabs for Discord mobile */
+/* Kettu ChannelTabs v3.1.0 - global Chrome-like persistent top tabs for Discord mobile */
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
@@ -11,9 +11,11 @@ const listeners=new Set();
 let ChannelStore=null,SelectedChannelStore=null,UserStore=null,GuildStore=null,ReadStateStore=null;
 let ChannelRouter=null,Nav=null,Flux=null,LazyActionSheet=null,ActionSheetRow=null;
 let rootInstalled=false,rootHookName="",sheetInstalled=false,watcher=null,lastObservedId="",navIntent=null;
+let rootChoice=null,rootRank=999,rootBypass=0,globalRootSeen=false;
+const rootRefs=new Set(),rootWrappers=new WeakMap(),fallbackPatched=new Set();
 
 const diag={
- root:false,rootHook:"",sheet:false,navigation:false,watcher:false,
+ root:false,rootHook:"",sheet:false,navigation:false,watcher:false,globalRoot:false,fallbackRoots:0,jsxHooks:0,
  observed:0,newTabs:0,replaced:0,closed:0,recent:0,renders:0,lastError:""
 };
 
@@ -41,7 +43,7 @@ function defaults(){
   showRecents:true,
   compact:false,
   haptic:true,
-  statusBarSpacing:false,
+  statusBarSpacing:true,
   longPressActions:true,
   restoreTabs:true,
   focusExistingOnNew:true
@@ -323,56 +325,178 @@ function TabsBar(){
  );
 }
 
-function RootShell({content}){
+function RootShell({content,global=false}){
  if(!storage.enabled)return content;
- const V=RN.View;if(!V)return React.createElement(React.Fragment,null,React.createElement(TabsBar),content);
- return React.createElement(V,{style:{flex:1},__kctRoot:true},React.createElement(TabsBar),React.createElement(V,{style:{flex:1}},content));
+ if(global){globalRootSeen=true;diag.globalRoot=true;}
+ const V=RN.View;
+ if(!V)return React.createElement(React.Fragment,null,React.createElement(TabsBar),content);
+ // Real layout row, not a floating ActionSheet/Modal. It permanently reserves
+ // space at the top so Discord cannot draw over the tabs during navigation.
+ return React.createElement(V,{style:{flex:1,backgroundColor:"#111214"},__kctRoot:true},
+  React.createElement(TabsBar),
+  React.createElement(V,{style:{flex:1,minHeight:0},__kctDiscordContent:true},content)
+ );
 }
 
-function tryDirectRoot(name){
- try{
-  const mod=M.findByName?.(name,false);
-  if(!mod||typeof mod.default!=="function")return false;
-  unpatches.push(patcher.after("default",mod,(_,res)=>{
-   try{
-    if(!storage.enabled||res?.props?.__kctRoot)return res;
-    return React.createElement(RootShell,{content:res});
-   }catch(e){err(`root:${name}`,e);return res}
-  }));
-  rootInstalled=true;rootHookName=name;diag.root=true;diag.rootHook=name;emit();return true;
- }catch(e){err(`tryRoot:${name}`,e);return false}
+function typeName(type){
+ try{return String(type?.displayName||type?.name||type?.render?.displayName||type?.render?.name||"")}catch{return ""}
 }
-
-function installJsxFallback(){
+function discoverRootRefs(){
+ const add=(x)=>{if(x&&(typeof x==="function"||typeof x==="object"))rootRefs.add(x)};
+ for(const prop of [
+  "NavigationContainer","BaseNavigationContainer","SafeAreaProvider","GestureHandlerRootView",
+  "AppNavigationContainer","AppNavigationContainerOrEmpty","PortalProviderComponent",
+  "RootThemeContextProvider","BackgroundOrForegroundApp"
+ ]){
+  try{const m=M.findByProps?.(prop);add(m?.[prop])}catch{}
+ }
+}
+function candidateRank(type,props){
+ if(rootRefs.has(type)){
+  const n=typeName(type);
+  if(/NavigationContainer|AppNavigationContainer/i.test(n))return 1;
+  if(/BackgroundOrForegroundApp|AppContainer/i.test(n))return 2;
+  if(/SafeAreaProvider|GestureHandlerRootView|PortalProvider/i.test(n))return 4;
+  return 3;
+ }
+ const n=typeName(type);
+ if(!n)return 999;
+ if(/^(NavigationContainer|BaseNavigationContainer|NavigationContainerInner|AppNavigationContainer|AppNavigationContainerOrEmpty)$/i.test(n))return 1;
+ if(/^(App|AppRoot|Root|RootComponent|DiscordApp|BackgroundOrForegroundApp|AppContainer|RootNavigator|RootStack|RootStackNavigator)$/i.test(n))return 2;
+ if(/^(RootThemeContextProvider|PortalProviderComponent|GestureWrapper|AccessibilityPreferencesContextProvider)$/i.test(n))return 3;
+ if(/SafeAreaProvider|GestureHandlerRootView|SafeAreaWrapper/i.test(n))return 4;
+ if(/^(StackNavigator|NativeStackNavigator|ChatPanelNativeStackNavigator|LaunchPadContainer)$/i.test(n))return 5;
+ if(/^(MainTabs|TabsNavigator|MainTabsNavigator|MainTabsNavigatorPanel|MainTabsChannelScreenStack)$/i.test(n))return 7;
+ if(props&&typeof props==="object"){
+  let score=0;
+  if("onReady" in props)score++;
+  if("onStateChange" in props)score++;
+  if("initialState" in props)score++;
+  if("linking" in props)score++;
+  if("theme" in props)score++;
+  if(score>=3)return 2;
+ }
+ return 999;
+}
+function chooseRoot(type,rank){
+ if(!type||rank>=999)return;
+ if(!rootChoice||rank<rootRank){
+  rootChoice=type;rootRank=rank;rootInstalled=true;
+  rootHookName=`global:${typeName(type)||"anonymous"}@${rank}`;
+  diag.root=true;diag.rootHook=rootHookName;emit();
+ }
+}
+function wrapperFor(type){
+ if(rootWrappers.has(type))return rootWrappers.get(type);
+ const Original=type;
+ function KettuChannelTabsGlobalRoot(props){
+  let child;
+  rootBypass++;
+  try{child=React.createElement(Original,props)}finally{rootBypass--}
+  if(rootChoice!==Original)return child;
+  return React.createElement(RootShell,{content:child,global:true});
+ }
+ KettuChannelTabsGlobalRoot.displayName=`KettuChannelTabsGlobal_${typeName(type)||"Root"}`;
+ rootWrappers.set(type,KettuChannelTabsGlobalRoot);
+ return KettuChannelTabsGlobalRoot;
+}
+function inspectElementArgs(args){
  try{
-  const jsx=M.findByProps?.("jsx","jsxs");if(!jsx)return false;
-  const wrappers=new WeakMap();let chosen="";
-  const candidates=/^(MainTabs|TabsNavigator|MainTabsChannelScreenStack|MainTabsNavigatorPanel|AppComponents)$/;
-  for(const method of ["jsx","jsxs"]){
-   if(typeof jsx[method]!=="function")continue;
-   unpatches.push(patcher.before(method,jsx,args=>{
-    try{
-     const type=args?.[0];if(typeof type!=="function")return;
-     const n=String(type.displayName||type.name||"");if(!candidates.test(n))return;
-     if(!chosen)chosen=n;if(n!==chosen)return;
-     if(wrappers.has(type)){args[0]=wrappers.get(type);return}
-     const Original=type;
-     function Wrapped(p){return React.createElement(RootShell,{content:React.createElement(Original,p)})}
-     Wrapped.displayName=`KettuChannelTabs_${n}`;wrappers.set(type,Wrapped);args[0]=Wrapped;
-     rootInstalled=true;rootHookName=`jsx:${n}`;diag.root=true;diag.rootHook=rootHookName;emit();
-    }catch(e){err("jsxRoot",e)}
-   }));
+  if(rootBypass>0||!storage.enabled)return;
+  const type=args?.[0],props=args?.[1];
+  if(!type||type===RootShell||type===TabsBar)return;
+  const n=typeName(type);
+  if(/^KettuChannelTabs/.test(n))return;
+  const rank=candidateRank(type,props);
+  if(rank>=999)return;
+  chooseRoot(type,rank);
+  // Only replace the chosen exact type. Lower-quality candidates keep rendering
+  // untouched, preventing nested duplicate tab bars.
+  if(rootChoice===type)args[0]=wrapperFor(type);
+ }catch(e){err("inspectRoot",e)}
+}
+function installGlobalElementHooks(){
+ try{
+  discoverRootRefs();
+  if(React&&typeof React.createElement==="function"){
+   unpatches.push(patcher.before("createElement",React,inspectElementArgs));diag.jsxHooks++;
   }
-  return true;
- }catch(e){err("jsxFallback",e);return false}
+  const jsx=M.findByProps?.("jsx","jsxs");
+  if(jsx){for(const m of ["jsx","jsxs"]){if(typeof jsx[m]==="function"){unpatches.push(patcher.before(m,jsx,inspectElementArgs));diag.jsxHooks++;}}}
+  const dev=M.findByProps?.("jsxDEV");
+  if(typeof dev?.jsxDEV==="function"){unpatches.push(patcher.before("jsxDEV",dev,inspectElementArgs));diag.jsxHooks++;}
+  return diag.jsxHooks>0;
+ }catch(e){err("globalHooks",e);return false}
 }
-
+function patchFallbackScreen(name){
+ if(fallbackPatched.has(name))return false;
+ try{
+  // Named-export modules can be patched directly.
+  const named=M.findByProps?.(name);
+  if(named&&typeof named[name]==="function"){
+   fallbackPatched.add(name);
+   unpatches.push(patcher.after(name,named,(_,res)=>{
+    try{
+     if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+     diag.root=true;diag.rootHook=`fallback:${name}`;rootHookName=diag.rootHook;
+     return React.createElement(RootShell,{content:res,global:false});
+    }catch(e){err(`fallback:${name}`,e);return res}
+   }));
+   diag.fallbackRoots++;emit();return true;
+  }
+  // Some Discord modules expose a default export object instead.
+  const mod=M.findByName?.(name,false);
+  if(mod&&typeof mod.default==="function"){
+   fallbackPatched.add(name);
+   unpatches.push(patcher.after("default",mod,(_,res)=>{
+    try{
+     if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+     diag.root=true;diag.rootHook=`fallback:${name}`;rootHookName=diag.rootHook;
+     return React.createElement(RootShell,{content:res,global:false});
+    }catch(e){err(`fallback:${name}`,e);return res}
+   }));
+   diag.fallbackRoots++;emit();return true;
+  }
+  // Class components are patchable through prototype.render even when findByName
+  // returns the component itself.
+  if(typeof mod==="function"&&typeof mod.prototype?.render==="function"){
+   fallbackPatched.add(name);
+   unpatches.push(patcher.after("render",mod.prototype,(_,res)=>{
+    try{
+     if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+     diag.root=true;diag.rootHook=`fallback:${name}`;rootHookName=diag.rootHook;
+     return React.createElement(RootShell,{content:res,global:false});
+    }catch(e){err(`fallback:${name}`,e);return res}
+   }));
+   diag.fallbackRoots++;emit();return true;
+  }
+ }catch(e){err(`patchFallback:${name}`,e)}
+ return false;
+}
 function installRoot(){
- if(rootInstalled)return;
- for(const n of ["MainTabs","TabsNavigator","MainTabsChannelScreenStack","MainTabsNavigatorPanel"]){if(tryDirectRoot(n))return}
- installJsxFallback();
+ discoverRootRefs();
+ if(diag.jsxHooks===0)installGlobalElementHooks();
+ // Names seen in real Discord Android component stacks, highest-level first.
+ // We try broad app/navigation roots before chat-only screens so the strip stays
+ // present in settings, DMs, guild channels and other routes.
+ const primary=[
+  "BackgroundOrForegroundApp","App","AppContainer","AppNavigationContainerOrEmpty",
+  "AppNavigationContainer","NavigationContainerInner","RootThemeContextProvider",
+  "PortalProviderComponent","GestureWrapper","SafeAreaWrapper"
+ ];
+ let primaryPatched=false;
+ for(const n of primary){if(patchFallbackScreen(n)){primaryPatched=true;break}}
+ if(!primaryPatched){
+  for(const n of [
+   "StackNavigator","NativeStackNavigator","ChatPanelNativeStackNavigator","LaunchPadContainer",
+   "MainTabs","MainTabsNavigatorPanel","MainTabsChannelScreenStack","TabsNavigator",
+   "FirstChannelScreen","StandaloneChannelScreen","SettingsOverviewScreen",
+   "UserSettingsOverviewScreen","SettingsScreen","ChannelScreen","Messages"
+  ]){
+   if(patchFallbackScreen(n))break;
+  }
+ }
 }
-
 function sheetHide(key){try{LazyActionSheet?.hideActionSheet?.(key)}catch{try{LazyActionSheet?.hideActionSheet?.()}catch{}}}
 function openSheet(key,Comp){
  try{
@@ -521,7 +645,7 @@ function Settings(){
    React.createElement(T,{style:s.t},"Açık sekmeler"),
    ...((storage.tabs||[]).length?(storage.tabs||[]).map(t=>React.createElement(V,{key:t.uid,style:s.row},React.createElement(T,{style:s.sub,numberOfLines:1},`${tabIcon(t)} ${t.name}`),React.createElement(P,{onPress:()=>closeTab(t.uid)},React.createElement(T,{style:{color:"#f23f42"}},"Kapat")))):[React.createElement(T,{key:"none",style:s.sub},"Sekme yok.")])
   ),
-  React.createElement(V,{style:s.c},React.createElement(T,{style:s.sub},`Üst UI: ${diag.root?"OK":"YOK"} (${diag.rootHook||"aranıyor"}) | Uzun basma: ${diag.sheet?"OK":"YOK"} | İzleyici: ${diag.watcher?"OK":"YOK"}\nNavigation: ${diag.navigation?"OK":"bekliyor"} | Gözlenen ${diag.observed} | Yeni ${diag.newTabs} | Değişen ${diag.replaced} | Kapanan ${diag.closed}${diag.lastError?`\nSon hata: ${diag.lastError}`:""}`))
+  React.createElement(V,{style:s.c},React.createElement(T,{style:s.sub},`Üst UI: ${diag.root?"OK":"YOK"} (${diag.rootHook||"aranıyor"}) | Global: ${diag.globalRoot?"OK":"bekliyor"} | Fallback ${diag.fallbackRoots} | JSX hook ${diag.jsxHooks}\nUzun basma: ${diag.sheet?"OK":"YOK"} | İzleyici: ${diag.watcher?"OK":"YOK"} | Navigation: ${diag.navigation?"OK":"bekliyor"}\nGözlenen ${diag.observed} | Yeni ${diag.newTabs} | Değişen ${diag.replaced} | Kapanan ${diag.closed}${diag.lastError?`\nSon hata: ${diag.lastError}`:""}`))
  );
 }
 
@@ -533,8 +657,8 @@ function onUnload(){
  if(watcher)clearInterval(watcher);watcher=null;
  for(const t of timers)clearTimeout(t);timers.length=0;
  while(unpatches.length){try{unpatches.pop()?.()}catch{}}
- listeners.clear();rootInstalled=false;sheetInstalled=false;
+ listeners.clear();rootInstalled=false;sheetInstalled=false;rootChoice=null;rootRank=999;globalRootSeen=false;rootRefs.clear();fallbackPatched.clear();
 }
 
-return {onLoad,onUnload,settings:Settings,__test:{kindOf,nameOf,descriptor,tabFrom,unreadInfo}};
+return {onLoad,onUnload,settings:Settings,__test:{kindOf,nameOf,descriptor,tabFrom,unreadInfo,candidateRank,typeName}};
 })(vendetta.metro,vendetta.metro.common,vendetta.patcher,vendetta.plugin,vendetta.logger,vendetta.ui,vendetta.utils);
