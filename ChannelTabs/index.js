@@ -1,6 +1,6 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
-/* Kettu ChannelTabs v3.3.0 - global Chrome-like persistent top tabs for Discord mobile */
+/* Kettu ChannelTabs v3.4.0 - global Chrome-like persistent top tabs for Discord mobile */
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
@@ -799,5 +799,5 @@ function onUnload(){
  stopRootDiscovery();closeModal();listeners.clear();rootInstalled=false;sheetInstalled=false;globalRootSeen=false;rootRefs.clear();fallbackPatched.clear();wrappedRootNames.clear();fallbackTimer=null;
 }
 
-return {onLoad,onUnload,settings:Settings,__test:{kindOf,nameOf,descriptor,tabFrom,unreadInfo,candidateRank,typeName}};
+return {onLoad,onUnload,settings:Settings,__test:{kindOf,nameOf,descriptor,tabFrom,unreadInfo,rootCandidate,typeName}};
 })(vendetta.metro,vendetta.metro.common,vendetta.patcher,vendetta.plugin,vendetta.logger,vendetta.ui,vendetta.utils);
