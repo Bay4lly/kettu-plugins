@@ -1,13 +1,13 @@
 {
   "name": "Kettu ChannelTabs",
-  "description": "Discord mobilin kalıcı uygulama root'una Chrome tarzı kanal/DM sekmeleri ekler. Startup -> ana uygulama root değişiminde kaybolmaz.",
+  "description": "Discord mobilde kalıcı Chrome tarzı kanal/DM sekmeleri. v3.4 yükleme sırasında oluşan fatal ReferenceError düzeltildi.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "3.3.0",
+  "hash": "3.4.0",
   "vendetta": {
     "icon": "ic_tabs_24px"
   }
