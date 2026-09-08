@@ -2,7 +2,7 @@
 "use strict";
 
 /*
- * Kettu MessageLogger v4.0.0
+ * Kettu MessageLogger v4.1.0
  * Author: bay4lly
  *
  * Safe DCDChat implementation:
@@ -46,7 +46,7 @@ let sheetPatched=false;
 const diag={
  flux:false,store:false,records:false,row:false,sheet:false,
  deletes:0,edits:0,deduped:0,rowRenders:0,red:0,overlay:0,
- renderRecords:0,rearms:0,lastError:""
+ renderRecords:0,rearms:0,colorInt:0,colorSkipped:0,lastError:""
 };
 
 function fail(where,e){
@@ -455,10 +455,27 @@ function installRow(forceLast=false){
      diag.overlay++;
     }
    }else{
-    // colorString is an existing supported DCDChat field. Force it to red even if
-    // another plugin had already generated a normal white value.
-    ret.message.colorString=RED;
-    diag.red++;
+    /*
+     * Discord Android 343.12 serializes $.message.colorString as an Int.
+     * Older builds/plugins sometimes treated it as a CSS-like string.
+     * Never write "#f04747" directly here: that crashes Kotlin serialization
+     * with "Failed to parse literal ... as an int value at $.colorString".
+     */
+    const pc=RN?.processColor;
+    if(typeof pc==="function"){
+     const nativeColor=pc(RED);
+     if(typeof nativeColor==="number"){
+      ret.message.colorString=nativeColor;
+      diag.colorInt++;
+      diag.red++;
+     }else{
+      // No valid native integer => leave Discord's own colour untouched.
+      diag.colorSkipped++;
+     }
+    }else{
+     // Safer to leave the message white than crash DCDChat.
+     diag.colorSkipped++;
+    }
    }
 
    return ret;
@@ -762,7 +779,8 @@ function Settings(){
    React.createElement(T,{style:st.sub},
     `Flux ${diag.flux?"OK":"YOK"} | Store ${diag.store?"OK":"YOK"} | Records ${diag.records?"OK":"YOK"} | Row ${diag.row?"OK":"YOK"}\n`+
     `Silme ${diag.deletes} | Edit ${diag.edits} | Tekrar ${diag.deduped} | RenderRecord ${diag.renderRecords}\n`+
-    `Row ${diag.rowRenders} | Kırmızı ${diag.red} | Overlay ${diag.overlay} | Rearm ${diag.rearms}`+
+    `Row ${diag.rowRenders} | Kırmızı ${diag.red} | Overlay ${diag.overlay} | Rearm ${diag.rearms}\n`+
+    `Native renk int ${diag.colorInt} | Atlanan renk ${diag.colorSkipped}`+
     `${diag.lastError?`\nSon hata: ${diag.lastError}`:""}`
    ),
    btn("RowManager renk patch'ini sona taşı",()=>{
