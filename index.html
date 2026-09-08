@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0c0d12">
+  <meta name="description" content="bay4lly tarafından hazırlanan Kettu eklentileri.">
+  <title>bay4lly • Kettu Plugins</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d12;
+      --panel: #14161d;
+      --panel-2: #1a1d26;
+      --border: #282d38;
+      --text: #f4f5f7;
+      --muted: #aab0bd;
+      --accent: #5865f2;
+      --accent-hover: #6d78f7;
+      --green: #23a55a;
+      --shadow: 0 18px 60px rgba(0,0,0,.30);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% -8%, rgba(88,101,242,.22), transparent 30rem),
+        radial-gradient(circle at 90% 3%, rgba(35,165,90,.08), transparent 25rem),
+        var(--bg);
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .container {
+      width: min(1160px, calc(100% - 28px));
+      margin: 0 auto;
+    }
+
+    header { padding: 58px 0 24px; }
+
+    .hero {
+      border: 1px solid var(--border);
+      border-radius: 26px;
+      padding: clamp(24px, 5vw, 44px);
+      background: linear-gradient(145deg, rgba(26,29,38,.96), rgba(14,16,21,.96));
+      box-shadow: var(--shadow);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255,255,255,.025);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 15px rgba(35,165,90,.85);
+    }
+
+    h1 {
+      margin: 18px 0 10px;
+      font-size: clamp(36px, 8vw, 68px);
+      line-height: .98;
+      letter-spacing: -.055em;
+    }
+
+    .hero p {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.7;
+    }
+
+    .hero-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .button {
+      appearance: none;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      padding: 10px 13px;
+      background: #222630;
+      cursor: pointer;
+      font-weight: 720;
+      transition: transform .14s ease, border-color .14s ease, background .14s ease;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      border-color: #3a4150;
+      background: #292e39;
+    }
+
+    .button.primary {
+      border-color: transparent;
+      background: var(--accent);
+    }
+
+    .button.primary:hover { background: var(--accent-hover); }
+    .button.subtle { background: transparent; }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 22px 0 16px;
+    }
+
+    .search {
+      min-width: 0;
+      width: 100%;
+      padding: 14px 15px;
+      border: 1px solid var(--border);
+      border-radius: 13px;
+      outline: none;
+      color: var(--text);
+      background: var(--panel);
+    }
+
+    .search:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88,101,242,.13);
+    }
+
+    .counter {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 14px;
+      padding-bottom: 48px;
+    }
+
+    .plugin-card {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: linear-gradient(160deg, var(--panel-2), var(--panel));
+      box-shadow: 0 8px 30px rgba(0,0,0,.15);
+    }
+
+    .plugin-card.hidden { display: none; }
+
+    .plugin-top {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .icon {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 48px;
+      border-radius: 14px;
+      background: rgba(88,101,242,.12);
+      border: 1px solid rgba(88,101,242,.20);
+      font-size: 24px;
+    }
+
+    .title-wrap { min-width: 0; }
+    .title-wrap h2 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+
+    .title-wrap span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .plugin-card > p {
+      min-height: 64px;
+      margin: 15px 0 17px;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 14px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: auto;
+    }
+
+    .url-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(0,0,0,.18);
+    }
+
+    .url-row code {
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #c9cdfb;
+      font-size: 11px;
+    }
+
+    .copy-mini {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 12px;
+    }
+
+    .install {
+      margin-bottom: 54px;
+      padding: 22px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+    }
+
+    .install h2 { margin: 0 0 10px; }
+    .install ol {
+      margin: 0;
+      padding-left: 22px;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    footer {
+      padding: 24px 0 44px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: max(22px, env(safe-area-inset-bottom));
+      z-index: 10;
+      transform: translate(-50%, 18px);
+      opacity: 0;
+      pointer-events: none;
+      padding: 11px 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #20242d;
+      box-shadow: var(--shadow);
+      transition: opacity .18s ease, transform .18s ease;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+
+    @media (max-width: 760px) {
+      header { padding-top: 22px; }
+      .grid { grid-template-columns: 1fr; }
+      .plugin-card > p { min-height: auto; }
+      .hero { border-radius: 20px; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .counter { padding-left: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="container">
+    <section class="hero">
+      <span class="badge">Kettu Plugins</span>
+      <h1>bay4lly plugins</h1>
+      <p>
+        Kettu için hazırlanmış mobil Discord eklentileri. İstediğin eklentinin Kettu kurulum adresini tek dokunuşla kopyala.
+      </p>
+      <div class="hero-buttons">
+        <a class="button primary" href="#plugins">Pluginlere Git</a>
+        <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins" target="_blank" rel="noopener">GitHub Repo</a>
+        <button class="button subtle" id="copyAll">Tüm Kettu URL'lerini Kopyala</button>
+      </div>
+    </section>
+  </header>
+
+  <main class="container">
+    <section id="plugins">
+      <div class="toolbar">
+        <input id="search" class="search" type="search" placeholder="Plugin ara..." autocomplete="off">
+        <span id="counter" class="counter">10 plugin</span>
+      </div>
+
+      <div class="grid" id="grid">
+        
+      <article class="plugin-card" data-search="translate mesajları uygulamadan çıkmadan çevir. google web anahtarsız, libretranslate desteği mevcut.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">🌐</div>
+          <div class="title-wrap">
+            <h2>Translate</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Mesajları uygulamadan çıkmadan çevir. Google Web anahtarsız, LibreTranslate desteği mevcut.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/Translate/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/Translate" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/Translate/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/Translate/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="betternotifications @everyone/@here filtreleri, kelime ve kullanıcı kuralları, titreşim ve tekrar davranışları.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">🔔</div>
+          <div class="title-wrap">
+            <h2>BetterNotifications</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>@everyone/@here filtreleri, kelime ve kullanıcı kuralları, titreşim ve tekrar davranışları.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/BetterNotifications/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/BetterNotifications" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/BetterNotifications/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/BetterNotifications/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="bettertyping kimin ne kadar süredir yazdığını gör; birden fazla yazanı takip et ve kendi typing göstergeni gizle.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">⌨️</div>
+          <div class="title-wrap">
+            <h2>BetterTyping</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Kimin ne kadar süredir yazdığını gör; birden fazla yazanı takip et ve kendi typing göstergeni gizle.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/BetterTyping/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/BetterTyping" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/BetterTyping/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/BetterTyping/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="accountswitcherplus mobil discord için daha hızlı hesap seçme ve hesaplar arasında geçiş arayüzü.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">👥</div>
+          <div class="title-wrap">
+            <h2>AccountSwitcherPlus</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Mobil Discord için daha hızlı hesap seçme ve hesaplar arasında geçiş arayüzü.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/AccountSwitcherPlus/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/AccountSwitcherPlus" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/AccountSwitcherPlus/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/AccountSwitcherPlus/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="channeltabs favori kanal ve dm&#x27;leri sekme olarak sabitle, hızlı geçiş yap ve görünümü özelleştir.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">📑</div>
+          <div class="title-wrap">
+            <h2>ChannelTabs</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Favori kanal ve DM&#x27;leri sekme olarak sabitle, hızlı geçiş yap ve görünümü özelleştir.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/ChannelTabs/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/ChannelTabs" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/ChannelTabs/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/ChannelTabs/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="betterstatus durum presetleri, emoji, süre ve diğer durum seçeneklerini tek yerden yönet.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">🟢</div>
+          <div class="title-wrap">
+            <h2>BetterStatus</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Durum presetleri, emoji, süre ve diğer durum seçeneklerini tek yerden yönet.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/BetterStatus/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/BetterStatus" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/BetterStatus/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/BetterStatus/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="imagetools avatar, emoji, sticker ve diğer medyaları açma, bağlantı kopyalama ve kaydetme araçları.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">🖼️</div>
+          <div class="title-wrap">
+            <h2>ImageTools</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Avatar, emoji, sticker ve diğer medyaları açma, bağlantı kopyalama ve kaydetme araçları.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/ImageTools/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/ImageTools" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/ImageTools/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/ImageTools/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="ghostpinglogger silinen mention ve ghost ping olaylarını yerel olarak kaydet ve görüntüle.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">👻</div>
+          <div class="title-wrap">
+            <h2>GhostPingLogger</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Silinen mention ve ghost ping olaylarını yerel olarak kaydet ve görüntüle.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/GhostPingLogger/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/GhostPingLogger" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/GhostPingLogger/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/GhostPingLogger/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="messagelogger silinen mesajları göster, edit geçmişini tut ve silinen mesaj görünümünü özelleştir.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">🗑️</div>
+          <div class="title-wrap">
+            <h2>MessageLogger</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Silinen mesajları göster, edit geçmişini tut ve silinen mesaj görünümünü özelleştir.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/MessageLogger/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/MessageLogger" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/MessageLogger/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/MessageLogger/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      <article class="plugin-card" data-search="fakenitro desteklenen istemci tarafı nitro benzeri özellikler ve emoji/sticker fallback araçları.">
+        <div class="plugin-top">
+          <div class="icon" aria-hidden="true">💎</div>
+          <div class="title-wrap">
+            <h2>FakeNitro</h2>
+            <span>by bay4lly</span>
+          </div>
+        </div>
+
+        <p>Desteklenen istemci tarafı Nitro benzeri özellikler ve emoji/sticker fallback araçları.</p>
+
+        <div class="actions">
+          <button class="button" data-copy="https://bay4lly.github.io/kettu-plugins/FakeNitro/">Kettu URL</button>
+          <a class="button subtle" href="https://github.com/Bay4lly/kettu-plugins/tree/main/FakeNitro" target="_blank" rel="noopener">Kaynak</a>
+        </div>
+
+        <div class="url-row">
+          <code>https://bay4lly.github.io/kettu-plugins/FakeNitro/</code>
+          <button class="copy-mini" data-copy="https://bay4lly.github.io/kettu-plugins/FakeNitro/" aria-label="Kurulum adresini kopyala">Kopyala</button>
+        </div>
+      </article>
+    
+      </div>
+    </section>
+
+    <section class="install">
+      <h2>Kettu'ya nasıl kurulur?</h2>
+      <ol>
+        <li>Kettu içinde <strong>Settings → Plugins</strong> bölümüne gir.</li>
+        <li>Sağ alttaki <strong>+</strong> düğmesine bas.</li>
+        <li>Bu sayfadaki istediğin pluginin <strong>Kettu URL</strong> butonuna basıp adresi kopyala.</li>
+        <li>Adresi Kettu'ya yapıştırıp plugini ekle ve etkinleştir.</li>
+      </ol>
+    </section>
+  </main>
+
+  <footer class="container">
+    bay4lly • Kettu Plugins
+  </footer>
+
+  <div id="toast" class="toast">Kopyalandı</div>
+
+  <script>
+    const pluginUrls = ["https://bay4lly.github.io/kettu-plugins/Translate/", "https://bay4lly.github.io/kettu-plugins/BetterNotifications/", "https://bay4lly.github.io/kettu-plugins/BetterTyping/", "https://bay4lly.github.io/kettu-plugins/AccountSwitcherPlus/", "https://bay4lly.github.io/kettu-plugins/ChannelTabs/", "https://bay4lly.github.io/kettu-plugins/BetterStatus/", "https://bay4lly.github.io/kettu-plugins/ImageTools/", "https://bay4lly.github.io/kettu-plugins/GhostPingLogger/", "https://bay4lly.github.io/kettu-plugins/MessageLogger/", "https://bay4lly.github.io/kettu-plugins/FakeNitro/"];
+
+    const toast = document.getElementById("toast");
+    let toastTimer;
+
+    function showToast(text) {
+      toast.textContent = text;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 1600);
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("Kettu URL kopyalandı");
+      } catch {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+        showToast("Kettu URL kopyalandı");
+      }
+    }
+
+    document.querySelectorAll("[data-copy]").forEach(button => {
+      button.addEventListener("click", () => copyText(button.dataset.copy));
+    });
+
+    document.getElementById("copyAll").addEventListener("click", async () => {
+      await copyText(pluginUrls.join("\n"));
+      showToast("Tüm Kettu URL'leri kopyalandı");
+    });
+
+    const search = document.getElementById("search");
+    const cards = [...document.querySelectorAll(".plugin-card")];
+    const counter = document.getElementById("counter");
+
+    search.addEventListener("input", () => {
+      const q = search.value.trim().toLowerCase();
+      let visible = 0;
+
+      cards.forEach(card => {
+        const hit = !q || card.dataset.search.includes(q);
+        card.classList.toggle("hidden", !hit);
+        if (hit) visible++;
+      });
+
+      counter.textContent = `${visible} plugin`;
+    });
+  </script>
+</body>
+</html>
