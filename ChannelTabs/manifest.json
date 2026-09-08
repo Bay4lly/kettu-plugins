@@ -1,13 +1,13 @@
 {
   "name": "Kettu ChannelTabs",
-  "description": "Mobil sohbet ekranına sabit kanal/DM sekmeleri ekler; sekmeleri uzun basma kanal menüsünden veya ayarlardan yönetir.",
+  "description": "Discord mobilin en üstüne Chrome benzeri kalıcı kanal/DM sekmeleri ekler; son kanallar, yeni/bu sekmede açma ve uzun basma menüsü içerir.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "230bf0491d9345d2229226ba28e7ddecccd4f7d7f514380f7838be598671e2df",
+  "hash": "aed3237ea930d369819796f8a58421e01eff2b46ba094ae870af75c3bfd17f05",
   "vendetta": {
     "icon": "ic_tab_24px"
   }
