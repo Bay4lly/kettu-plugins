@@ -1,0 +1,14 @@
+{
+  "name": "Kettu BetterStatus",
+  "description": "Custom status/presence presetleri oluşturur; metin, emoji, süre, online durumu ve telefondan seçilen yerel görselleri preset kartlarında yönetir.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "38e0bfec6744e38a114a416c8b7489a4cc379cecadddf96ac86a8be007c301e0",
+  "vendetta": {
+    "icon": "ic_status_24px"
+  }
+}

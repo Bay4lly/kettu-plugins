@@ -1,0 +1,14 @@
+{
+  "name": "Kettu ChannelTabs",
+  "description": "Mobil sohbet ekranına sabit kanal/DM sekmeleri ekler; sekmeleri uzun basma kanal menüsünden veya ayarlardan yönetir.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "230bf0491d9345d2229226ba28e7ddecccd4f7d7f514380f7838be598671e2df",
+  "vendetta": {
+    "icon": "ic_tab_24px"
+  }
+}

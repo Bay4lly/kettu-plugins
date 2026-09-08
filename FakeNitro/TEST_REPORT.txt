@@ -1,0 +1,29 @@
+PASS: node --check index.js
+PASS: node --check test.js
+PASS: manifest JSON parse
+PASS: manifest SHA-256 matches index.js (c768a52b396a0e848cd5b8764e05d53540257e3ebac79129e89096db504589c3)
+PASS: mock integration suite x100
+PASS: no desktop DOM/window/require dependency in runtime plugin
+
+Integration coverage:
+- Kettu legacy plugin export lifecycle
+- capability patch/unpatch
+- Premium App Icons UI capability
+- client themes UI capability + local proto event
+- HD stream/video-quality capability
+- emoji picker capabilities
+- sticker picker capabilities
+- soundboard capability
+- foreign emoji CDN hyperlink fallback
+- raw URL fallback
+- animated emoji fallback
+- same-guild usable emoji native path
+- DM external emoji fallback
+- unavailable emoji availability marker
+- edit-message emoji fallback
+- static sticker fallback + stickerIds clearing
+- GIF sticker URL
+- official sticker pack native path
+- availability-object patching
+- dynamic settings toggle
+- lazy/missing-module smoke test

@@ -1,0 +1,14 @@
+{
+  "name": "Kettu MessageLogger v2.3",
+  "description": "Silinen mesajları sohbette tutar, kırmızı yazı/overlay vurgusu ve Vencord benzeri inline edit geçmişi sağlar; FakeNitro uyumluluğu güçlendirilmiştir.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "bc0f3bce7823a44d94c94b7291bb65cdfcbe8be92e318ef221ef91e5e5696c69",
+  "vendetta": {
+    "icon": "ic_history_24px"
+  }
+}

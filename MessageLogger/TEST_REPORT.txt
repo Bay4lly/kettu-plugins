@@ -1,0 +1,10 @@
+Kettu MessageLogger v2.3 2.3.0 TEST REPORT
+
+Syntax: PASS
+Unit/mock test: PASS
+Repeated test loop: PASS x50
+Manifest SHA-256: bc0f3bce7823a44d94c94b7291bb65cdfcbe8be92e318ef221ef91e5e5696c69
+Manifest hash matches index.js: PASS
+Cross-plugin suite: PASS
+
+Test ortamı gerçek Discord Android native DCDChat renderer'ının birebir kopyası değildir. Runtime feature-detection tanılama ekranında ayrıca kontrol edilir.

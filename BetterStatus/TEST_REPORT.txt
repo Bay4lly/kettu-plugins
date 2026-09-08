@@ -1,0 +1,10 @@
+Kettu BetterStatus 1.0.0 TEST REPORT
+
+Syntax: PASS
+Unit/mock test: PASS
+Repeated test loop: PASS x50
+Manifest SHA-256: 38e0bfec6744e38a114a416c8b7489a4cc379cecadddf96ac86a8be007c301e0
+Manifest hash matches index.js: PASS
+Cross-plugin suite: PASS
+
+Test ortamı gerçek Discord Android native DCDChat renderer'ının birebir kopyası değildir. Runtime feature-detection tanılama ekranında ayrıca kontrol edilir.

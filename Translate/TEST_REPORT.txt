@@ -1,0 +1,10 @@
+Kettu Translate 1.0.0 TEST REPORT
+
+Syntax: PASS
+Unit/mock test: PASS
+Repeated test loop: PASS x50
+Manifest SHA-256: 77c7f06d34fe4ac21f311026a28fa32c7f8fb7326512154950732bec3fc68da0
+Manifest hash matches index.js: PASS
+Cross-plugin suite: PASS
+
+Test ortamı gerçek Discord Android native DCDChat renderer'ının birebir kopyası değildir. Runtime feature-detection tanılama ekranında ayrıca kontrol edilir.

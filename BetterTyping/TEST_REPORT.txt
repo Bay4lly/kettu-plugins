@@ -1,0 +1,10 @@
+Kettu BetterTyping 1.0.0 TEST REPORT
+
+Syntax: PASS
+Unit/mock test: PASS
+Repeated test loop: PASS x50
+Manifest SHA-256: 2caf3ff8771bda378c4040b83080a0550e7504d3a3d815073e364e06eb29b8c1
+Manifest hash matches index.js: PASS
+Cross-plugin suite: PASS
+
+Test ortamı gerçek Discord Android native DCDChat renderer'ının birebir kopyası değildir. Runtime feature-detection tanılama ekranında ayrıca kontrol edilir.

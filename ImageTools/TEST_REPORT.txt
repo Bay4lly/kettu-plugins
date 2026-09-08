@@ -1,0 +1,10 @@
+Kettu ImageTools 1.0.0 TEST REPORT
+
+Syntax: PASS
+Unit/mock test: PASS
+Repeated test loop: PASS x50
+Manifest SHA-256: 4f1f0efea48c426d360876a64d52c54a14c2777621696ac5598ce81dcc89ef8a
+Manifest hash matches index.js: PASS
+Cross-plugin suite: PASS
+
+Test ortamı gerçek Discord Android native DCDChat renderer'ının birebir kopyası değildir. Runtime feature-detection tanılama ekranında ayrıca kontrol edilir.

@@ -1,0 +1,14 @@
+{
+  "name": "Kettu BetterNotifications",
+  "description": "Mobil Discord bildirimlerini kelime, kullanıcı, kanal, mention ve sessiz saat kurallarıyla filtreler; tekrar ve titreşim davranışını ayarlar.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "d7881596cd84c2c97cdec4e0736de17926ec1831515d45b52acce892854bf147",
+  "vendetta": {
+    "icon": "ic_notification_settings_24px"
+  }
+}

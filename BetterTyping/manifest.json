@@ -1,0 +1,14 @@
+{
+  "name": "Kettu BetterTyping",
+  "description": "Typing göstergesini ayrıntılandırır; birden fazla kişiyi ve yazma süresini gösterir, istenirse kendi typing eventini göndermez.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "2caf3ff8771bda378c4040b83080a0550e7504d3a3d815073e364e06eb29b8c1",
+  "vendetta": {
+    "icon": "ic_chat_bubble_24px"
+  }
+}

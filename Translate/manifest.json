@@ -1,0 +1,14 @@
+{
+  "name": "Kettu Translate",
+  "description": "Mesajları uzun basma menüsünden veya otomatik olarak çevirir; Google web translate ve LibreTranslate desteği, inline sonuç ve markdown koruması.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "77c7f06d34fe4ac21f311026a28fa32c7f8fb7326512154950732bec3fc68da0",
+  "vendetta": {
+    "icon": "ic_language_24px"
+  }
+}

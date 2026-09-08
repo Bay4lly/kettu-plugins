@@ -1,0 +1,10 @@
+Kettu AccountSwitcher+ 1.0.0 TEST REPORT
+
+Syntax: PASS
+Unit/mock test: PASS
+Repeated test loop: PASS x50
+Manifest SHA-256: 9682954a586cf4810acee63691f8688000d69a38a1767c027dab0e8c2c7d8047
+Manifest hash matches index.js: PASS
+Cross-plugin suite: PASS
+
+Test ortamı gerçek Discord Android native DCDChat renderer'ının birebir kopyası değildir. Runtime feature-detection tanılama ekranında ayrıca kontrol edilir.

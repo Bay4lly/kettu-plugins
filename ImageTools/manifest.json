@@ -1,0 +1,14 @@
+{
+  "name": "Kettu ImageTools",
+  "description": "Profil fotoğrafı, mesaj eki, custom emoji ve sticker için kaydet/aç/link kopyala araçlarını uzun basma menülerine ekler.",
+  "authors": [
+    {
+      "name": "bay4lly"
+    }
+  ],
+  "main": "index.js",
+  "hash": "4f1f0efea48c426d360876a64d52c54a14c2777621696ac5598ce81dcc89ef8a",
+  "vendetta": {
+    "icon": "ic_image_24px"
+  }
+}
