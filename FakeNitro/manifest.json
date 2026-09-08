@@ -1,11 +1,14 @@
 {
   "name": "Kettu FakeNitro",
-  "description": "Kettu mobile FakeNitro port: fake emoji/sticker CDN fallback plus client-side Nitro UI unlocks for stream quality, themes, app icons and soundboard.",
+  "description": "Kettu mobile FakeNitro: emoji/sticker fallback, Nitro theme persistence, HD UI unlocks and App Icon premium-gate fixes.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "c768a52b396a0e848cd5b8764e05d53540257e3ebac79129e89096db504589c3"
+  "hash": "1.2.0",
+  "vendetta": {
+    "icon": "ic_nitro_rep_24px"
+  }
 }
