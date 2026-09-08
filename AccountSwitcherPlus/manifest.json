@@ -1,13 +1,13 @@
 {
   "name": "Kettu AccountSwitcher+",
-  "description": "Mobilde birden fazla Discord hesabını ayrı kartlarda kaydedip hızlı geçiş yapar; tokenları yerel AES-GCM kasasında PIN ile şifreler.",
+  "description": "Discord mobil ayarlarında Çıkış Yap'ın altına PC/web tarzı Hesap Değiştir ekler; kullanılan hesapları otomatik hatırlar ve hızlı geçiş sağlar.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "9682954a586cf4810acee63691f8688000d69a38a1767c027dab0e8c2c7d8047",
+  "hash": "8cf94bdc931073ff1329c511541e43ecbc735cbdd533b179e42afd352495a50f",
   "vendetta": {
     "icon": "ic_switch_account_24px"
   }
