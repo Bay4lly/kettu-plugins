@@ -1,7 +1,7 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
 /*
- * Kettu FakeNitro v1.0.0
+ * Kettu FakeNitro v1.2.0
  * Mobile-oriented reimplementation of Vencord FakeNitro behavior for Kettu's
  * Vendetta compatibility API.
  *
@@ -35,7 +35,10 @@ const DEFAULTS={
   forceExternalEmojiLinks:true,
   forceUnavailableStickerLinks:true,
   patchAvailabilityObjects:true,
-  preserveLocalThemes:true
+  preserveLocalThemes:true,
+  reapplyLocalTheme:true,
+  unlockAppIconPremiumGate:true,
+  patchAppIconObjects:true
 };
 
 const diag={
@@ -53,6 +56,16 @@ const diag={
   availabilityPatches:0,
   capabilityPatches:{},
   localThemeEvents:0,
+  themeCaptures:0,
+  themeReapplies:0,
+  themeRevertsBlocked:0,
+  themeProtoReady:false,
+  appIconModules:0,
+  appIconPremiumPatches:0,
+  appIconObjectPatches:0,
+  appIconContextHits:0,
+  appIconGetters:[],
+  appIconSetters:[],
   lastError:""
 };
 
@@ -83,6 +96,32 @@ let UserStore=null;
 let PermissionStore=null;
 let PermissionsBits=null;
 let FluxDispatcher=common?.FluxDispatcher||null;
+
+let PreloadedSettingsActions=null;
+let AppearanceProtoClass=null;
+let ClientThemeProtoClass=null;
+
+let localThemeRuntime=null;
+let themeReapplyTimer=null;
+let themeInternalDispatch=false;
+
+let appIconContextUntil=0;
+let appIconContextDepth=0;
+const appIconModules=new Set();
+const appIconPremiumModules=new Set();
+
+const APP_ICON_CURRENT_GETTERS=[
+  "getCurrentDesktopIcon","getCurrentAppIcon","getCurrentMobileIcon",
+  "getSelectedAppIcon","getCurrentIcon"
+];
+const APP_ICON_SETTERS=[
+  "setAppIcon","setCurrentAppIcon","setAlternateAppIcon",
+  "selectAppIcon","updateAppIcon"
+];
+const APP_ICON_LIST_GETTERS=[
+  "getAppIcons","getAvailableAppIcons","getAppIconOptions",
+  "getPremiumAppIcons","getSelectableAppIcons"
+];
 
 function initDefaults(){
   for(const [k,v] of Object.entries(DEFAULTS)) if(storage[k]===undefined) storage[k]=v;
@@ -387,19 +426,394 @@ function patchStores(){
   const sound=safeFindStore("SoundboardStore")||safeFindByProps("getSoundsForGuild");
   patchAvailabilityStore(sound,"soundboard");
 }
+
+function deepClonePlain(value,depth=0,seen=new WeakMap()){
+  if(value==null||typeof value!=="object"||depth>8)return value;
+  if(seen.has(value))return seen.get(value);
+  if(Array.isArray(value)){
+    const a=[];seen.set(value,a);
+    for(const v of value)a.push(deepClonePlain(v,depth+1,seen));
+    return a;
+  }
+  const out={};seen.set(value,out);
+  for(const key of Object.keys(value)){
+    const v=value[key];
+    if(typeof v==="function")continue;
+    out[key]=deepClonePlain(v,depth+1,seen);
+  }
+  return out;
+}
+
+function wrapperValue(v){
+  if(v==null)return null;
+  if(typeof v==="number"||typeof v==="string")return v;
+  if(typeof v==="object"){
+    if(v.value!==undefined)return v.value;
+    if(v.value_!==undefined)return v.value_;
+  }
+  return null;
+}
+
+function getThemePresetId(appearance){
+  const c=appearance?.clientThemeSettings||appearance?.client_theme_settings;
+  return wrapperValue(
+    c?.backgroundGradientPresetId ??
+    c?.background_gradient_preset_id
+  );
+}
+
+function hasThemeSelection(appearance){
+  return getThemePresetId(appearance)!=null;
+}
+
+function searchProtoClassField(localName,protoClass){
+  try{
+    const field=protoClass?.fields?.find?.(f=>f?.localName===localName||f?.name===localName);
+    if(!field)return null;
+    const getter=Object.values(field).find(v=>typeof v==="function");
+    return getter?.()||null;
+  }catch{return null;}
+}
+
+function discoverThemeProto(){
+  try{
+    if(!PreloadedSettingsActions){
+      const candidates=[
+        safeFindByProps("getCurrentValue","ProtoClass"),
+        safeFindByProps("ProtoClass","PreloadedUserSettingsActionCreators"),
+        safeFindByProps("PreloadedUserSettingsActionCreators")
+      ].filter(Boolean);
+
+      for(const c of candidates){
+        const x=c?.PreloadedUserSettingsActionCreators||c;
+        if(x?.ProtoClass&&typeof x?.getCurrentValue==="function"){
+          PreloadedSettingsActions=x;
+          break;
+        }
+      }
+    }
+
+    if(PreloadedSettingsActions?.ProtoClass){
+      AppearanceProtoClass=
+        AppearanceProtoClass||
+        searchProtoClassField("appearance",PreloadedSettingsActions.ProtoClass);
+
+      ClientThemeProtoClass=
+        ClientThemeProtoClass||
+        searchProtoClassField("clientThemeSettings",AppearanceProtoClass);
+
+      diag.themeProtoReady=!!(AppearanceProtoClass&&ClientThemeProtoClass);
+    }
+  }catch(e){
+    logError("discoverThemeProto",e);
+  }
+}
+
+function snapshotTheme(appearance){
+  if(!appearance)return null;
+  const presetId=getThemePresetId(appearance);
+  if(presetId==null)return null;
+
+  const theme=appearance?.theme;
+  const snap={
+    theme,
+    presetId:Number(presetId),
+    capturedAt:Date.now(),
+    rawAppearance:appearance
+  };
+
+  localThemeRuntime=snap;
+  storage.localThemePresetId=snap.presetId;
+  if(theme!==undefined)storage.localThemeBase=theme;
+  diag.themeCaptures++;
+  return snap;
+}
+
+function storedThemeSnapshot(){
+  if(localThemeRuntime?.presetId!=null)return localThemeRuntime;
+  const id=Number(storage.localThemePresetId);
+  if(!Number.isFinite(id))return null;
+  return {
+    theme:storage.localThemeBase,
+    presetId:id,
+    capturedAt:0,
+    rawAppearance:null
+  };
+}
+
+function buildThemeAppearance(baseAppearance,snap){
+  if(!snap||snap.presetId==null)return baseAppearance;
+
+  try{
+    discoverThemeProto();
+
+    if(AppearanceProtoClass?.create&&ClientThemeProtoClass?.create){
+      const current=baseAppearance||{};
+      const client=ClientThemeProtoClass.create({
+        backgroundGradientPresetId:{value:snap.presetId}
+      });
+
+      return AppearanceProtoClass.create({
+        ...current,
+        ...(snap.theme!==undefined?{theme:snap.theme}:{}),
+        clientThemeSettings:client
+      });
+    }
+  }catch(e){
+    logError("buildThemeAppearance(proto)",e);
+  }
+
+  // Fallback: preserve the actual object shape Discord already handed us.
+  try{
+    const out=baseAppearance
+      ?Object.assign(Object.create(Object.getPrototypeOf(baseAppearance)),baseAppearance)
+      :{};
+
+    if(snap.theme!==undefined)out.theme=snap.theme;
+
+    const existing=
+      out.clientThemeSettings||
+      out.client_theme_settings||
+      snap.rawAppearance?.clientThemeSettings||
+      snap.rawAppearance?.client_theme_settings||
+      {};
+
+    const client=Object.assign(
+      Object.create(Object.getPrototypeOf(existing)||Object.prototype),
+      existing
+    );
+    client.backgroundGradientPresetId={value:snap.presetId};
+    out.clientThemeSettings=client;
+    return out;
+  }catch{
+    return baseAppearance;
+  }
+}
+
+function forceThemeIntoProto(proto){
+  const snap=storedThemeSnapshot();
+  if(!snap||!proto||typeof proto!=="object")return false;
+
+  try{
+    proto.appearance=buildThemeAppearance(proto.appearance,snap);
+    return true;
+  }catch(e){
+    logError("forceThemeIntoProto",e);
+    return false;
+  }
+}
+
+function dispatchLocalTheme(reason="reapply"){
+  if(themeInternalDispatch||!storage.unlockClientThemes||!storage.preserveLocalThemes)return false;
+  const snap=storedThemeSnapshot();
+  if(!snap||!FluxDispatcher?.dispatch)return false;
+
+  try{
+    discoverThemeProto();
+
+    let proto=null;
+    if(PreloadedSettingsActions?.ProtoClass?.create){
+      proto=PreloadedSettingsActions.ProtoClass.create();
+      proto.appearance=buildThemeAppearance(
+        PreloadedSettingsActions?.getCurrentValue?.()?.appearance,
+        snap
+      );
+    }else{
+      proto={appearance:buildThemeAppearance(null,snap)};
+    }
+
+    themeInternalDispatch=true;
+    FluxDispatcher.dispatch({
+      type:"USER_SETTINGS_PROTO_UPDATE",
+      local:true,
+      partial:true,
+      __kfnThemeInternal:true,
+      settings:{type:1,proto}
+    });
+    diag.themeReapplies++;
+    return true;
+  }catch(e){
+    logError(`dispatchLocalTheme:${reason}`,e);
+    return false;
+  }finally{
+    themeInternalDispatch=false;
+  }
+}
+
+function scheduleThemeReapply(){
+  if(!storage.reapplyLocalTheme)return;
+  try{clearTimeout(themeReapplyTimer)}catch{}
+  themeReapplyTimer=setTimeout(()=>{
+    themeReapplyTimer=null;
+    dispatchLocalTheme("scheduled");
+  },90);
+  timers.push(themeReapplyTimer);
+}
+
+function markAppIconContext(ms=750){
+  appIconContextUntil=Math.max(appIconContextUntil,Date.now()+ms);
+  diag.appIconContextHits++;
+}
+function inAppIconContext(){
+  return appIconContextDepth>0||Date.now()<appIconContextUntil;
+}
+
+function unlockAppIconObjects(value,depth=0,seen=new WeakMap()){
+  if(!storage.patchAppIconObjects||value==null||depth>6)return value;
+  if(typeof value!=="object")return value;
+  if(seen.has(value))return seen.get(value);
+
+  if(Array.isArray(value)){
+    let changed=false;
+    const out=value.slice();seen.set(value,out);
+    for(let i=0;i<out.length;i++){
+      const n=unlockAppIconObjects(out[i],depth+1,seen);
+      if(n!==out[i]){out[i]=n;changed=true;}
+    }
+    return changed?out:value;
+  }
+
+  const keys=Object.keys(value);
+  const looksIcon=
+    keys.some(k=>/icon/i.test(k))||
+    ["premium","isPremium","locked","available","disabled","requiresPremium"].some(k=>k in value);
+
+  if(!looksIcon)return value;
+
+  let out=value;
+  let changed=false;
+  const set=(key,val)=>{
+    if(!(key in value)||value[key]===val)return;
+    if(out===value)out=Object.assign(Object.create(Object.getPrototypeOf(value)),value);
+    out[key]=val;changed=true;
+  };
+
+  set("premium",false);
+  set("isPremium",false);
+  set("requiresPremium",false);
+  set("locked",false);
+  set("disabled",false);
+  set("available",true);
+
+  if(changed)diag.appIconObjectPatches++;
+  return out;
+}
+
+function patchAppIconRuntime(){
+  let found=0;
+
+  const registerModule=(mod)=>{
+    if(!mod||appIconModules.has(mod))return;
+    appIconModules.add(mod);
+    diag.appIconModules++;
+    found++;
+
+    for(const key of APP_ICON_CURRENT_GETTERS){
+      if(typeof mod[key]!=="function")continue;
+      if(!diag.appIconGetters.includes(key))diag.appIconGetters.push(key);
+
+      patchBefore(mod,key,args=>{
+        markAppIconContext();
+        appIconContextDepth++;
+        globalThis.queueMicrotask?.(()=>{appIconContextDepth=Math.max(0,appIconContextDepth-1);});
+        return args;
+      },`appIconContext:${key}`);
+    }
+
+    for(const key of APP_ICON_SETTERS){
+      if(typeof mod[key]!=="function")continue;
+      if(!diag.appIconSetters.includes(key))diag.appIconSetters.push(key);
+
+      patchBefore(mod,key,args=>{
+        markAppIconContext(1500);
+        return args;
+      },`appIconSetter:${key}`);
+    }
+
+    for(const key of APP_ICON_LIST_GETTERS){
+      if(typeof mod[key]!=="function")continue;
+      patchAfter(mod,key,(args,ret)=>{
+        if(!storage.unlockPremiumAppIcons)return ret;
+        markAppIconContext();
+        return unlockAppIconObjects(ret);
+      },`appIconList:${key}`);
+    }
+  };
+
+  for(const prop of [...APP_ICON_CURRENT_GETTERS,...APP_ICON_SETTERS,...APP_ICON_LIST_GETTERS]){
+    for(const mod of safeFindAllByProp(prop))registerModule(mod);
+  }
+
+  // Vencord has a second premium gate specifically in the App Icon screen.
+  // Runtime Kettu cannot source-patch that exact call, so only make isPremium
+  // return true while an App Icon getter/setter is actively rendering/handling.
+  if(storage.unlockAppIconPremiumGate){
+    for(const mod of safeFindAllByProp("isPremium")){
+      if(!mod||typeof mod.isPremium!=="function"||appIconPremiumModules.has(mod))continue;
+      appIconPremiumModules.add(mod);
+
+      if(patchInstead(mod,"isPremium",(args,orig)=>{
+        if(storage.unlockPremiumAppIcons&&inAppIconContext())return true;
+        return orig(...args);
+      },"appIcon:isPremium")){
+        diag.appIconPremiumPatches++;
+      }
+    }
+  }
+
+  return found;
+}
+
 function patchThemeLocalPersistence(){
+  FluxDispatcher=FluxDispatcher||common?.FluxDispatcher||safeFindByProps("dispatch","subscribe");
   if(!FluxDispatcher?.dispatch||isPatched(FluxDispatcher,"dispatch"))return;
+
+  discoverThemeProto();
+
   patchBefore(FluxDispatcher,"dispatch",args=>{
     if(!storage.unlockClientThemes||!storage.preserveLocalThemes)return args;
+
     const ev=args?.[0];
-    if(ev?.type!=="USER_SETTINGS_PROTO_UPDATE")return args;
+    if(!ev||ev.__kfnThemeInternal)return args;
+
     try{
-      const appearance=ev?.settings?.proto?.appearance;
-      if(appearance?.clientThemeSettings||appearance?.client_theme_settings){
-        ev.local=true;
-        diag.localThemeEvents++;
+      if(ev.type==="USER_SETTINGS_PROTO_UPDATE"){
+        const proto=ev?.settings?.proto;
+        const appearance=proto?.appearance;
+
+        if(appearance&&hasThemeSelection(appearance)){
+          // This is the actual user-selected Nitro gradient theme.
+          snapshotTheme(appearance);
+          ev.local=true;
+          diag.localThemeEvents++;
+          scheduleThemeReapply();
+          return args;
+        }
+
+        // Discord's sync/save can immediately send back appearance without the
+        // premium gradient. Keep our last local selection instead.
+        if(proto&&storedThemeSnapshot()&&!ev.local){
+          if(forceThemeIntoProto(proto)){
+            ev.local=true;
+            diag.themeRevertsBlocked++;
+            scheduleThemeReapply();
+          }
+        }
       }
-    }catch{}
+
+      if(ev.type==="CONNECTION_OPEN"){
+        const proto=ev?.userSettingsProto||ev?.user_settings_proto;
+        if(proto&&storedThemeSnapshot()){
+          if(forceThemeIntoProto(proto)){
+            diag.themeRevertsBlocked++;
+            scheduleThemeReapply();
+          }
+        }
+      }
+    }catch(e){
+      logError("themeDispatch",e);
+    }
+
     return args;
   },"USER_SETTINGS_PROTO_UPDATE");
 }
@@ -411,6 +825,7 @@ function scanAndPatch(){
     patchCapabilities();
     patchStores();
     patchThemeLocalPersistence();
+    patchAppIconRuntime();
   }catch(e){logError("scanAndPatch",e);}
 }
 function statusText(){
@@ -427,6 +842,16 @@ function statusText(){
     `Emoji link dönüşümü: ${diag.emojiTransforms}`,
     `Sticker link dönüşümü: ${diag.stickerTransforms}`,
     `Yerel tema olayı: ${diag.localThemeEvents}`,
+    `Tema seçim yakalama: ${diag.themeCaptures}`,
+    `Tema reapply: ${diag.themeReapplies}`,
+    `Tema revert engeli: ${diag.themeRevertsBlocked}`,
+    `Tema proto: ${diag.themeProtoReady?"OK":"fallback"}`,
+    `App Icon modülü: ${diag.appIconModules}`,
+    `App Icon premium gate: ${diag.appIconPremiumPatches}`,
+    `App Icon obje unlock: ${diag.appIconObjectPatches}`,
+    `App Icon context hit: ${diag.appIconContextHits}`,
+    `App Icon getter: ${diag.appIconGetters.join(", ")||"-"}`,
+    `App Icon setter: ${diag.appIconSetters.join(", ")||"-"}`,
     `--- capability patchleri ---`,cap,
     diag.lastError?`Son hata: ${diag.lastError}`:""
   ].filter(Boolean).join("\n");
@@ -444,7 +869,7 @@ function Settings(){
     React.createElement(View,{style:{flexDirection:"row",flexWrap:"wrap",gap:6,marginTop:5}},...SIZES.map(n=>React.createElement(Pressable,{key:String(n),onPress:()=>set(key,n),style:[styles.btn,{paddingVertical:7,paddingHorizontal:9,marginTop:0},Number(storage[key])===n&&styles.btnOn]},React.createElement(Text,{style:styles.btnText},String(n)))))
   );
   return React.createElement(ScrollView,{contentContainerStyle:styles.root},
-    React.createElement(Text,{style:styles.title},"Kettu FakeNitro v1.0.0"),
+    React.createElement(Text,{style:styles.title},"Kettu FakeNitro v1.2.0"),
     React.createElement(Text,{style:styles.sub},"Kettu için mobil FakeNitro portu. Sunucu tarafında gerçek Nitro vermez; kilitli emoji/stickerları gerektiğinde Discord CDN bağlantısına çevirir ve istemci tarafı Nitro arayüz kontrollerini açmayı dener."),
     React.createElement(View,{style:styles.card},
       React.createElement(Text,{style:styles.head},"Emoji"),
@@ -470,15 +895,20 @@ function Settings(){
       React.createElement(Text,{style:styles.head},"Nitro arayüzleri"),
       row("HD yayın / stream quality menüsü","unlockStreamQuality","1080p/60fps ve benzeri client kalite kontrollerini açmayı dener."),
       row("Nitro temaları","unlockClientThemes","Client theme/gradient kontrollerini açar."),
-      row("Temayı yerelde koru","preserveLocalThemes","Tema proto değişikliklerini local olarak işaretler; build'e göre kalıcılık değişebilir."),
-      row("Premium uygulama ikonları","unlockPremiumAppIcons","Discord'un App Icon ekranındaki premium kontrolünü açmayı dener."),
+      row("Temayı yerelde koru","preserveLocalThemes","Seçilen gradient temayı Discord sync geri çevirmeye çalışsa bile yerelde korur."),
+      row("Tema geri dönerse yeniden uygula","reapplyLocalTheme","Tema seçiminden ve ayar sync'inden sonra yerel protoyu yeniden uygular."),
+      button("Kaydedilen Nitro temasını tekrar uygula",()=>{dispatchLocalTheme("manual");force();}),
+      button("Kaydedilen tema kilidini temizle",()=>{localThemeRuntime=null;delete storage.localThemePresetId;delete storage.localThemeBase;force();}),
+      row("Premium uygulama ikonları","unlockPremiumAppIcons","App Icon ekranındaki capability kontrollerini açar."),
+      row("App Icon ikinci premium kapısını aç","unlockAppIconPremiumGate","Sadece App Icon ekranı/aksiyonu aktifken Discord isPremium kontrolünü true yapar."),
+      row("App Icon seçenek kilitlerini kaldır","patchAppIconObjects","App Icon listelerindeki locked/premium/disabled alanlarını yerel olarak açar."),
       row("Soundboard erişimi","unlockSoundboard","Unavailable sound istemci kontrollerini açmayı dener.")
     ),
     React.createElement(View,{style:styles.card},
       React.createElement(Text,{style:styles.head},"Uyumluluk"),
       row("Unavailable nesneleri UI'da available göster","patchAvailabilityObjects","Emoji/sticker/sound seçicilerinde gri kilitleri azaltır."),
       button("Modülleri yeniden tara",()=>{scanAndPatch();force();}),
-      React.createElement(Text,{style:[styles.small,{marginTop:8}]},"Discord bazı modülleri ekran açılana kadar yüklemez. App Icon veya yayın ekranını açtıktan sonra bunu bir kez basmak tanılamada işe yarar.")
+      React.createElement(Text,{style:[styles.small,{marginTop:8}]},"Discord bazı modülleri ekran açılana kadar yüklemez. Özellikle App Icon ekranını bir kez açıp buraya dönerek \"Modülleri yeniden tara\"ya bas. Tanılamada App Icon getter/setter isimleri görünürse ikinci premium kapısı da yakalanmıştır.")
     ),
     React.createElement(View,{style:styles.card},
       React.createElement(Text,{style:styles.head},"Tanılama"),
@@ -496,9 +926,16 @@ function onLoad(){
   logInfo("loaded",statusText());
 }
 function onUnload(){
+  try{if(themeReapplyTimer)clearTimeout(themeReapplyTimer)}catch{}
+  themeReapplyTimer=null;
   while(timers.length){try{clearTimeout(timers.pop());}catch{}}
   while(unpatches.length){try{unpatches.pop()?.();}catch{}}
+  appIconModules.clear();
+  appIconPremiumModules.clear();
   logInfo("unloaded");
 }
-return {onLoad,onUnload,settings:Settings};
+return {onLoad,onUnload,settings:Settings,__test:{
+  getThemePresetId,snapshotTheme,storedThemeSnapshot,forceThemeIntoProto,
+  unlockAppIconObjects,markAppIconContext,inAppIconContext,scanAndPatch,diag
+}};
 })(vendetta.metro,vendetta.metro.common,vendetta.patcher,vendetta.plugin,vendetta.logger,vendetta.ui,vendetta.utils)
