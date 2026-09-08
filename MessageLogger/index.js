@@ -2,7 +2,7 @@
 "use strict";
 
 /*
- * Kettu MessageLogger v4.1.0
+ * Kettu MessageLogger v4.2.0
  * Author: bay4lly
  *
  * Safe DCDChat implementation:
@@ -46,7 +46,7 @@ let sheetPatched=false;
 const diag={
  flux:false,store:false,records:false,row:false,sheet:false,
  deletes:0,edits:0,deduped:0,rowRenders:0,red:0,overlay:0,
- renderRecords:0,rearms:0,colorInt:0,colorSkipped:0,lastError:""
+ renderRecords:0,rearms:0,colorInt:0,colorSkipped:0,colorFields:new Set(),fallbackOverlay:0,lastError:""
 };
 
 function fail(where,e){
@@ -61,6 +61,7 @@ function defaults(){
  if(storage.inlineEdits===undefined)storage.inlineEdits=true;
  if(storage.keepDeletedVisible===undefined)storage.keepDeletedVisible=true;
  if(storage.deletedStyle===undefined)storage.deletedStyle="redText";
+ if(storage.redFallbackOverlay===undefined)storage.redFallbackOverlay=true;
 }
 
 function k(ch,id){return `${String(ch||"?")}:${String(id||"?")}`}
@@ -360,6 +361,55 @@ function unpatchRow(){
  rowPatched=false;
 }
 
+
+function paintExistingNumericColors(root,nativeColor){
+ let changed=0;
+ const seen=new WeakSet();
+
+ function walk(v,depth,path){
+  if(!v||typeof v!=="object"||depth>4||seen.has(v))return;
+  seen.add(v);
+
+  for(const name of Object.keys(v)){
+   let value;
+   try{value=v[name]}catch{continue}
+
+   const nextPath=path?`${path}.${name}`:name;
+
+   if(/color/i.test(name) && typeof value==="number"){
+    try{
+     v[name]=nativeColor;
+     diag.colorFields.add(nextPath);
+     changed++;
+    }catch{}
+    continue;
+   }
+
+   if(value && typeof value==="object" && !Array.isArray(value)){
+    walk(value,depth+1,nextPath);
+   }
+  }
+ }
+
+ walk(root,0,"message");
+ return changed;
+}
+
+function applyOverlaySafe(ret){
+ const pc=RN?.processColor;
+ if(typeof pc!=="function")return false;
+
+ const bg=pc(OVERLAY_BG);
+ const gutter=pc(OVERLAY_GUTTER);
+
+ if(typeof bg!=="number"||typeof gutter!=="number")return false;
+
+ ret.backgroundHighlight=ret.backgroundHighlight??{};
+ ret.backgroundHighlight.backgroundColor=bg;
+ ret.backgroundHighlight.gutterColor=gutter;
+ return true;
+}
+
 function installRow(forceLast=false){
  discover();
 
@@ -445,36 +495,42 @@ function installRow(forceLast=false){
    ret.message.edited="deleted";
 
    if(storage.deletedStyle==="overlay"){
-    const pc=RN?.processColor;
-    // Native serializer expects processed colors here. Do nothing if processColor
-    // is unavailable rather than feeding strings into an integer field.
-    if(typeof pc==="function"){
-     ret.backgroundHighlight=ret.backgroundHighlight??{};
-     ret.backgroundHighlight.backgroundColor=pc(OVERLAY_BG);
-     ret.backgroundHighlight.gutterColor=pc(OVERLAY_GUTTER);
+    if(applyOverlaySafe(ret)){
      diag.overlay++;
     }
    }else{
     /*
-     * Discord Android 343.12 serializes $.message.colorString as an Int.
-     * Older builds/plugins sometimes treated it as a CSS-like string.
-     * Never write "#f04747" directly here: that crashes Kotlin serialization
-     * with "Failed to parse literal ... as an int value at $.colorString".
+     * Discord 343.12 no longer has a reliable "body text color" field exposed
+     * under the old colorString contract. We therefore NEVER invent a property.
+     *
+     * Instead, mutate only numeric color fields that already exist in the
+     * DCDChat Message object. Same keys, same types => serializer-safe.
      */
     const pc=RN?.processColor;
+    let changed=0;
+
     if(typeof pc==="function"){
      const nativeColor=pc(RED);
      if(typeof nativeColor==="number"){
-      ret.message.colorString=nativeColor;
-      diag.colorInt++;
-      diag.red++;
-     }else{
-      // No valid native integer => leave Discord's own colour untouched.
-      diag.colorSkipped++;
+      changed=paintExistingNumericColors(ret.message,nativeColor);
+      if(changed>0){
+       diag.colorInt+=changed;
+       diag.red++;
+      }
      }
-    }else{
-     // Safer to leave the message white than crash DCDChat.
+    }
+
+    if(changed===0){
      diag.colorSkipped++;
+    }
+
+    /*
+     * On builds where the body text colour is no longer exposed as a mutable
+     * row field, make deletion visually red via the native supported highlight.
+     * This is intentionally a fallback, not a fake claim that white text changed.
+     */
+    if(storage.redFallbackOverlay && applyOverlaySafe(ret)){
+     diag.fallbackOverlay++;
     }
    }
 
@@ -768,7 +824,8 @@ function Settings(){
    row("Silinen mesajları logla","logDeletes"),
    row("Silinen mesajı sohbette bırak","keepDeletedVisible"),
    row("Düzenlemeleri logla","logEdits"),
-   row("Eski düzenlemeleri mesajın üstünde göster","inlineEdits")
+   row("Eski düzenlemeleri mesajın üstünde göster","inlineEdits"),
+   row("Kırmızı yazı çalışmazsa kırmızı overlay kullan","redFallbackOverlay")
   ),
   React.createElement(V,{style:st.card},
    React.createElement(T,{style:st.text},"Silinen mesaj görünümü"),
@@ -780,7 +837,8 @@ function Settings(){
     `Flux ${diag.flux?"OK":"YOK"} | Store ${diag.store?"OK":"YOK"} | Records ${diag.records?"OK":"YOK"} | Row ${diag.row?"OK":"YOK"}\n`+
     `Silme ${diag.deletes} | Edit ${diag.edits} | Tekrar ${diag.deduped} | RenderRecord ${diag.renderRecords}\n`+
     `Row ${diag.rowRenders} | Kırmızı ${diag.red} | Overlay ${diag.overlay} | Rearm ${diag.rearms}\n`+
-    `Native renk int ${diag.colorInt} | Atlanan renk ${diag.colorSkipped}`+
+    `Native renk int ${diag.colorInt} | Atlanan renk ${diag.colorSkipped} | Fallback overlay ${diag.fallbackOverlay}\n`+
+    `Bulunan renk alanları: ${[...diag.colorFields].slice(0,8).join(", ")||"-"}`+
     `${diag.lastError?`\nSon hata: ${diag.lastError}`:""}`
    ),
    btn("RowManager renk patch'ini sona taşı",()=>{
@@ -844,7 +902,9 @@ return {
   displayContent,
   deleted,
   edits,
-  rawCurrent
+  rawCurrent,
+  paintExistingNumericColors,
+  applyOverlaySafe
  }
 };
 
