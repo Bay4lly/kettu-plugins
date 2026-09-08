@@ -1,6 +1,6 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
-/* Kettu ChannelTabs v3.2.0 - global Chrome-like persistent top tabs for Discord mobile */
+/* Kettu ChannelTabs v3.3.0 - global Chrome-like persistent top tabs for Discord mobile */
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
@@ -11,15 +11,17 @@ const listeners=new Set();
 let ChannelStore=null,SelectedChannelStore=null,UserStore=null,GuildStore=null,ReadStateStore=null;
 let ChannelRouter=null,Nav=null,Flux=null,LazyActionSheet=null,ActionSheetRow=null;
 let rootInstalled=false,rootHookName="",sheetInstalled=false,watcher=null,lastObservedId="",navIntent=null;
-let rootChoice=null,rootRank=999,rootBypass=0,globalRootSeen=false;
+let rootBypass=0,globalRootSeen=false;
 let modalState=null;
 const rootDiscoveryUnpatches=[];
 const RootContext=React?.createContext?.(false)||null;
 const rootRefs=new Set(),rootWrappers=new WeakMap(),fallbackPatched=new Set();
+const wrappedRootNames=new Set();
+let fallbackTimer=null;
 
 const diag={
  root:false,rootHook:"",sheet:false,navigation:false,watcher:false,globalRoot:false,fallbackRoots:0,jsxHooks:0,
- observed:0,newTabs:0,replaced:0,closed:0,recent:0,renders:0,lastError:""
+ rootWraps:0,rootRemounts:0,observed:0,newTabs:0,replaced:0,closed:0,recent:0,renders:0,lastError:""
 };
 
 function err(where,e){
@@ -409,135 +411,268 @@ function stopRootDiscovery(){
  }
 }
 
-function RootShell({content,global=false}){
+function RootShell({content,rootName=""}){
  if(!storage.enabled)return content;
- if(global){globalRootSeen=true;diag.globalRoot=true;}
+ globalRootSeen=true;
+ diag.globalRoot=true;
+ diag.root=true;
+ if(rootName){
+  diag.rootHook=`persistent:${rootName}`;
+  wrappedRootNames.add(rootName);
+ }
+
  const V=RN.View;
- React.useEffect?.(()=>{
-  // The root wrapper is already mounted. Continuing to hook every JSX/createElement
-  // call buys us nothing and can destabilise Discord.
-  const t=setTimeout(stopRootDiscovery,0);
-  return()=>clearTimeout(t);
- },[]);
- if(!V)return React.createElement(React.Fragment,null,React.createElement(TabsBar),content,React.createElement(TabsOverlay));
- return React.createElement(V,{style:{flex:1,backgroundColor:"#111214"},__kctRoot:true},
+ if(!V){
+  return React.createElement(
+   React.Fragment,
+   null,
+   React.createElement(TabsBar),
+   content,
+   React.createElement(TabsOverlay)
+  );
+ }
+
+ return React.createElement(
+  V,
+  {style:{flex:1,backgroundColor:"#111214"},__kctRoot:true},
   React.createElement(TabsBar),
-  React.createElement(V,{style:{flex:1,minHeight:0},__kctDiscordContent:true},content),
+  React.createElement(
+   V,
+   {style:{flex:1,minHeight:0},__kctDiscordContent:true},
+   content
+  ),
   React.createElement(TabsOverlay)
  );
 }
 
 function typeName(type){
- try{return String(type?.displayName||type?.name||type?.render?.displayName||type?.render?.name||"")}catch{return ""}
+ try{
+  return String(
+   type?.displayName||
+   type?.name||
+   type?.render?.displayName||
+   type?.render?.name||
+   ""
+  );
+ }catch{return ""}
 }
+
 function discoverRootRefs(){
- const add=(x)=>{if(x&&(typeof x==="function"||typeof x==="object"))rootRefs.add(x)};
- for(const prop of ["NavigationContainer","BaseNavigationContainer","AppNavigationContainer","AppNavigationContainerOrEmpty"]){
-  try{const m=M.findByProps?.(prop);add(m?.[prop])}catch{}
+ const add=(x)=>{
+  if(x&&(typeof x==="function"||typeof x==="object"))rootRefs.add(x);
+ };
+
+ // These are Discord's own persistent JS roots seen in Android stacks.
+ for(const prop of [
+  "BackgroundOrForegroundApp",
+  "AppNavigationContainerOrEmpty",
+  "AppNavigationContainer"
+ ]){
+  try{
+   const byProps=M.findByProps?.(prop);
+   add(byProps?.[prop]);
+  }catch{}
+  try{
+   const byName=M.findByName?.(prop,false);
+   if(typeof byName==="function"||typeof byName==="object"){
+    add(byName?.default||byName);
+   }
+  }catch{}
  }
 }
-function candidateRank(type,props){
- if(rootRefs.has(type))return 1;
+
+/*
+ * IMPORTANT:
+ * Do NOT treat generic NavigationContainer / AppContainer as primary roots.
+ * v3.2 did that and caught a temporary startup tree. Discord later unmounted it,
+ * taking the tabs with it.
+ *
+ * We keep the element hooks alive and only intercept the three Discord roots
+ * below. If Discord remounts one during login -> main app, it gets wrapped again.
+ */
+function rootCandidate(type){
+ if(rootRefs.has(type))return true;
  const n=typeName(type);
- if(/^(NavigationContainer|BaseNavigationContainer|NavigationContainerInner|AppNavigationContainer|AppNavigationContainerOrEmpty)$/i.test(n))return 1;
- return 999;
+ return /^(BackgroundOrForegroundApp|AppNavigationContainerOrEmpty|AppNavigationContainer)$/i.test(n);
 }
-function chooseRoot(type){
- if(rootChoice||!type)return;
- rootChoice=type;rootRank=1;rootInstalled=true;
- rootHookName=`global:${typeName(type)||"NavigationRoot"}`;
- diag.root=true;diag.rootHook=rootHookName;emit();
-}
+
 function wrapperFor(type){
  if(rootWrappers.has(type))return rootWrappers.get(type);
+
  const Original=type;
- function KettuChannelTabsSingleRoot(props){
-  const inside=RootContext&&React?.useContext?!!React.useContext(RootContext):false;
+ const originalName=typeName(type)||"DiscordRoot";
+
+ function KettuChannelTabsPersistentRoot(props){
+  const inside=RootContext&&React?.useContext
+   ?!!React.useContext(RootContext)
+   :false;
+
   let child;
   rootBypass++;
-  try{child=React.createElement(Original,props)}finally{rootBypass--}
-  if(inside||rootChoice!==Original)return child;
-  const shell=React.createElement(RootShell,{content:child,global:true});
-  return RootContext?React.createElement(RootContext.Provider,{value:true},shell):shell;
+  try{
+   child=React.createElement(Original,props);
+  }finally{
+   rootBypass--;
+  }
+
+  // If Discord nests AppNavigationContainer under BackgroundOrForegroundApp,
+  // only the outermost wrapper draws the bar.
+  if(inside)return child;
+
+  diag.rootRemounts++;
+  const shell=React.createElement(
+   RootShell,
+   {content:child,rootName:originalName}
+  );
+
+  return RootContext
+   ?React.createElement(RootContext.Provider,{value:true},shell)
+   :shell;
  }
- KettuChannelTabsSingleRoot.displayName=`KettuChannelTabsSingle_${typeName(type)||"Root"}`;
- rootWrappers.set(type,KettuChannelTabsSingleRoot);
- return KettuChannelTabsSingleRoot;
+
+ KettuChannelTabsPersistentRoot.displayName=
+  `KettuChannelTabsPersistent_${originalName}`;
+
+ rootWrappers.set(type,KettuChannelTabsPersistentRoot);
+ return KettuChannelTabsPersistentRoot;
 }
+
 function inspectElementArgs(args){
  try{
-  if(rootBypass>0||!storage.enabled||rootChoice)return;
-  const type=args?.[0],props=args?.[1];
+  if(rootBypass>0||!storage.enabled)return;
+
+  const type=args?.[0];
   if(!type||type===RootShell||type===TabsBar||type===TabsOverlay)return;
-  if(candidateRank(type,props)!==1)return;
-  chooseRoot(type);
-  args[0]=wrapperFor(type);
- }catch(e){err("inspectRoot",e)}
+  if(!rootCandidate(type))return;
+
+  const wrapped=wrapperFor(type);
+  if(type===wrapped)return;
+
+  args[0]=wrapped;
+  diag.root=true;
+  diag.rootWraps++;
+  const n=typeName(type)||"DiscordRoot";
+  diag.rootHook=`hook:${n}`;
+ }catch(e){
+  err("inspectRoot",e);
+ }
 }
+
 function installGlobalElementHooks(){
  try{
   if(rootDiscoveryUnpatches.length)return true;
+
   discoverRootRefs();
+
   if(React&&typeof React.createElement==="function"){
-   rootDiscoveryUnpatches.push(patcher.before("createElement",React,inspectElementArgs));diag.jsxHooks++;
+   rootDiscoveryUnpatches.push(
+    patcher.before("createElement",React,inspectElementArgs)
+   );
+   diag.jsxHooks++;
   }
+
   const jsx=M.findByProps?.("jsx","jsxs");
   if(jsx){
-   for(const m of ["jsx","jsxs"])if(typeof jsx[m]==="function"){
-    rootDiscoveryUnpatches.push(patcher.before(m,jsx,inspectElementArgs));diag.jsxHooks++;
+   for(const name of ["jsx","jsxs"]){
+    if(typeof jsx[name]!=="function")continue;
+    rootDiscoveryUnpatches.push(
+     patcher.before(name,jsx,inspectElementArgs)
+    );
+    diag.jsxHooks++;
    }
   }
+
   const dev=M.findByProps?.("jsxDEV");
   if(typeof dev?.jsxDEV==="function"){
-   rootDiscoveryUnpatches.push(patcher.before("jsxDEV",dev,inspectElementArgs));diag.jsxHooks++;
+   rootDiscoveryUnpatches.push(
+    patcher.before("jsxDEV",dev,inspectElementArgs)
+   );
+   diag.jsxHooks++;
   }
+
   return rootDiscoveryUnpatches.length>0;
- }catch(e){err("globalHooks",e);return false}
+ }catch(e){
+  err("globalHooks",e);
+  return false;
+ }
 }
-function patchOneFallback(){
- if(globalRootSeen||rootChoice)return false;
- for(const name of ["AppNavigationContainer","AppNavigationContainerOrEmpty","BackgroundOrForegroundApp","AppContainer","MainTabs"]){
-  if(fallbackPatched.has(name))continue;
+
+/*
+ * Fallback is intentionally narrow and only installed if, after several seconds,
+ * none of the three real Discord roots has ever been seen.
+ *
+ * It patches ONE MainTabs render path. If a real persistent root later appears,
+ * the fallback stops drawing because globalRootSeen becomes true.
+ */
+function installFallbackOnce(){
+ if(globalRootSeen||fallbackPatched.size)return false;
+
+ for(const name of ["MainTabs","MainTabsNavigatorPanel","MainTabsChannelScreenStack"]){
   try{
    const named=M.findByProps?.(name);
    if(named&&typeof named[name]==="function"){
     fallbackPatched.add(name);
-    unpatches.push(patcher.after(name,named,(_,res)=>{
-     try{
-      if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
-      diag.root=true;diag.rootHook=`fallback:${name}`;
-      return React.createElement(RootShell,{content:res,global:false});
-     }catch(e){err(`fallback:${name}`,e);return res}
-    }));
-    diag.fallbackRoots++;emit();return true;
+    unpatches.push(
+     patcher.after(name,named,(_,res)=>{
+      try{
+       if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+       diag.root=true;
+       diag.rootHook=`fallback:${name}`;
+       diag.fallbackRoots++;
+       return React.createElement(
+        RootShell,
+        {content:res,rootName:`fallback:${name}`}
+       );
+      }catch(e){
+       err(`fallback:${name}`,e);
+       return res;
+      }
+     })
+    );
+    return true;
    }
+
    const mod=M.findByName?.(name,false);
    if(mod&&typeof mod.default==="function"){
     fallbackPatched.add(name);
-    unpatches.push(patcher.after("default",mod,(_,res)=>{
-     try{
-      if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
-      diag.root=true;diag.rootHook=`fallback:${name}`;
-      return React.createElement(RootShell,{content:res,global:false});
-     }catch(e){err(`fallback:${name}`,e);return res}
-    }));
-    diag.fallbackRoots++;emit();return true;
+    unpatches.push(
+     patcher.after("default",mod,(_,res)=>{
+      try{
+       if(!storage.enabled||globalRootSeen||res?.props?.__kctRoot)return res;
+       diag.root=true;
+       diag.rootHook=`fallback:${name}`;
+       diag.fallbackRoots++;
+       return React.createElement(
+        RootShell,
+        {content:res,rootName:`fallback:${name}`}
+       );
+      }catch(e){
+       err(`fallback:${name}`,e);
+       return res;
+      }
+     })
+    );
+    return true;
    }
-  }catch(e){err(`fallback:${name}`,e)}
+  }catch(e){
+   err(`fallback:${name}`,e);
+  }
  }
  return false;
 }
+
 function installRoot(){
  installGlobalElementHooks();
- // IMPORTANT: no fallback is installed at the same time as the global hook.
- // Give the real navigation root time to mount first. This fixes the duplicate
- // top bars shown in Discord 343.x.
- timers.push(setTimeout(()=>{
-  if(!globalRootSeen&&!rootChoice){
-   stopRootDiscovery();
-   patchOneFallback();
-  }
- },3000));
+
+ // Unlike v3.2, DO NOT stop the global hook after first mount.
+ // Discord can destroy its startup root and build the main-app root later.
+ if(!fallbackTimer){
+  fallbackTimer=setTimeout(()=>{
+   fallbackTimer=null;
+   if(!globalRootSeen)installFallbackOnce();
+  },6500);
+  timers.push(fallbackTimer);
+ }
 }
 
 function openRecentSheet(){haptic();setModal({type:"recent"})}
@@ -661,7 +796,7 @@ function onUnload(){
  if(watcher)clearInterval(watcher);watcher=null;
  for(const t of timers)clearTimeout(t);timers.length=0;
  while(unpatches.length){try{unpatches.pop()?.()}catch{}}
- stopRootDiscovery();closeModal();listeners.clear();rootInstalled=false;sheetInstalled=false;rootChoice=null;rootRank=999;globalRootSeen=false;rootRefs.clear();fallbackPatched.clear();
+ stopRootDiscovery();closeModal();listeners.clear();rootInstalled=false;sheetInstalled=false;globalRootSeen=false;rootRefs.clear();fallbackPatched.clear();wrappedRootNames.clear();fallbackTimer=null;
 }
 
 return {onLoad,onUnload,settings:Settings,__test:{kindOf,nameOf,descriptor,tabFrom,unreadInfo,candidateRank,typeName}};
