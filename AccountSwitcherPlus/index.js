@@ -2,42 +2,46 @@
 "use strict";
 
 /*
- * Kettu AccountSwitcher+ v2.0.0
- * PC/Web style mobile account switcher.
- * - No PIN / no vault UI.
- * - Adds "Hesap Değiştir" directly below Discord's Logout row when possible.
- * - Automatically remembers accounts you use.
- * - Uses Discord's internal switchAccountToken.
+ * Kettu AccountSwitcher+ v3.0.0
+ * Author: bay4lly
+ *
+ * PC/Web-style mobile account switcher.
+ * - Native Kettu custom settings page (no broken ActionSheet overlay)
+ * - "Hesap Değiştir" directly below Logout
+ * - Current account is remembered automatically
+ * - Add another account with email/phone + password WITHOUT logging out
+ * - TOTP / backup-code MFA support
+ * - Passwords are never stored
+ * - Saved auth tokens are AES-GCM encrypted when WebCrypto is available
  */
 
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
 
-const ROW_KEY="BAY4LLY_ACCOUNT_SWITCHER";
-const SHEET_KEY="bay4lly-account-switcher";
+const ROW_KEY="BAY4LLY_ACCOUNT_SWITCHER_V3";
+const CUSTOM_ROUTE="PUPU_CUSTOM_PAGE";
 const unpatches=[];
 
 let TokenManager=null;
 let Auth=null;
 let UserStore=null;
 let Flux=null;
-let ActionSheet=null;
 let SettingConstants=null;
 let CreateListModule=null;
-
-let cryptoKeyPromise=null;
+let TabsNavigationRef=null;
 let captureTimer=null;
+let cryptoKeyPromise=null;
 
 const diag={
  row:false,
- listPatch:false,
+ nav:false,
  tokenManager:false,
  auth:false,
- crypto:false,
- nativeImported:0,
- captured:0,
- switched:0,
+ currentCaptured:false,
+ credentialAdds:0,
+ mfaAdds:0,
+ switches:0,
  lastError:""
 };
 
@@ -51,553 +55,724 @@ function toast(text){
 }
 
 function defaults(){
- if(!storage.quickAccounts || typeof storage.quickAccounts!=="object" || Array.isArray(storage.quickAccounts)){
-  storage.quickAccounts={};
+ if(!storage.accounts || typeof storage.accounts!=="object" || Array.isArray(storage.accounts)){
+  storage.accounts={};
  }
- if(storage.version===undefined)storage.version=2;
+ if(storage.version===undefined)storage.version=3;
  if(storage.autoRemember===undefined)storage.autoRemember=true;
 }
 
 function hasCrypto(){
- return !!globalThis.crypto?.subtle
-  && typeof globalThis.crypto?.getRandomValues==="function"
-  && typeof TextEncoder!=="undefined"
-  && typeof TextDecoder!=="undefined";
+ try{
+  return !!globalThis.crypto?.subtle
+   && typeof globalThis.crypto?.getRandomValues==="function"
+   && typeof TextEncoder!=="undefined"
+   && typeof TextDecoder!=="undefined";
+ }catch{return false}
 }
 
 function bytesToB64(bytes){
  let s="";
- for(const b of bytes)s+=String.fromCharCode(b);
+ for(let i=0;i<bytes.length;i++)s+=String.fromCharCode(bytes[i]);
  return btoa(s);
 }
-
 function b64ToBytes(s){
  return Uint8Array.from(atob(String(s||"")),c=>c.charCodeAt(0));
 }
 
+function getFallbackKey(){
+ if(!storage.fallbackKey){
+  let s="";
+  for(let i=0;i<32;i++)s+=String.fromCharCode(Math.floor(Math.random()*256));
+  storage.fallbackKey=btoa(s);
+ }
+ return b64ToBytes(storage.fallbackKey);
+}
+function xorSeal(text){
+ const key=getFallbackKey();
+ const src=new TextEncoder().encode(String(text));
+ const out=new Uint8Array(src.length);
+ for(let i=0;i<src.length;i++)out[i]=src[i]^key[i%key.length];
+ return "obf:"+bytesToB64(out);
+}
+function xorOpen(blob){
+ const key=getFallbackKey();
+ const src=b64ToBytes(String(blob).slice(4));
+ const out=new Uint8Array(src.length);
+ for(let i=0;i<src.length;i++)out[i]=src[i]^key[i%key.length];
+ return new TextDecoder().decode(out);
+}
+
 async function getCryptoKey(){
  if(cryptoKeyPromise)return cryptoKeyPromise;
-
  cryptoKeyPromise=(async()=>{
-  if(!hasCrypto())throw new Error("Bu Discord/Kettu sürümünde WebCrypto bulunamadı");
-
-  if(!storage.localAccountKey){
+  if(!hasCrypto())return null;
+  if(!storage.localEncryptionKey){
    const raw=crypto.getRandomValues(new Uint8Array(32));
-   storage.localAccountKey=bytesToB64(raw);
+   storage.localEncryptionKey=bytesToB64(raw);
    raw.fill(0);
   }
-
   return crypto.subtle.importKey(
    "raw",
-   b64ToBytes(storage.localAccountKey),
+   b64ToBytes(storage.localEncryptionKey),
    {name:"AES-GCM"},
    false,
    ["encrypt","decrypt"]
   );
  })();
-
  return cryptoKeyPromise;
 }
 
-async function encryptToken(token){
+async function sealToken(token){
  const key=await getCryptoKey();
+ if(!key)return xorSeal(token);
+
  const iv=crypto.getRandomValues(new Uint8Array(12));
- const data=new TextEncoder().encode(String(token));
+ const src=new TextEncoder().encode(String(token));
  try{
-  const encrypted=new Uint8Array(
-   await crypto.subtle.encrypt({name:"AES-GCM",iv},key,data)
-  );
-  return `k2:${bytesToB64(iv)}:${bytesToB64(encrypted)}`;
+  const enc=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,src));
+  return `aes:${bytesToB64(iv)}:${bytesToB64(enc)}`;
  }finally{
-  data.fill(0);
+  src.fill(0);
   iv.fill(0);
  }
 }
 
-async function decryptToken(blob){
+async function openToken(blob){
  const value=String(blob||"");
- if(!value.startsWith("k2:"))throw new Error("Bu hesap eski AccountSwitcher formatında. Hesaba bir kez yeniden giriş yap.");
-
- const [,iv64,data64]=value.split(":");
- const key=await getCryptoKey();
- const decrypted=await crypto.subtle.decrypt(
-  {name:"AES-GCM",iv:b64ToBytes(iv64)},
-  key,
-  b64ToBytes(data64)
- );
-
- return new TextDecoder().decode(decrypted);
+ if(value.startsWith("aes:")){
+  const [,iv64,data64]=value.split(":");
+  const key=await getCryptoKey();
+  if(!key)throw new Error("Şifreleme anahtarı kullanılamıyor");
+  const buf=await crypto.subtle.decrypt(
+   {name:"AES-GCM",iv:b64ToBytes(iv64)},
+   key,
+   b64ToBytes(data64)
+  );
+  return new TextDecoder().decode(buf);
+ }
+ if(value.startsWith("obf:"))return xorOpen(value);
+ if(value.startsWith("k2:")){
+  // Migration from our old v2 format.
+  const [,iv64,data64]=value.split(":");
+  const key=await getCryptoKey();
+  if(!key)throw new Error("Eski hesap kaydı açılamadı");
+  const buf=await crypto.subtle.decrypt(
+   {name:"AES-GCM",iv:b64ToBytes(iv64)},
+   key,
+   b64ToBytes(data64)
+  );
+  return new TextDecoder().decode(buf);
+ }
+ throw new Error("Hesap kaydı bu sürümle uyumlu değil");
 }
 
-function avatarUrl(account,size=128){
- if(!account?.id || !account?.avatar)return null;
- const ext=String(account.avatar).startsWith("a_")?"gif":"png";
- return `https://cdn.discordapp.com/avatars/${account.id}/${account.avatar}.${ext}?size=${size}`;
-}
-
-function normalizeAccount(user,tokenBlob){
+function normalizeUser(user){
  if(!user?.id)return null;
  return {
   id:String(user.id),
   username:String(user.username||"hesap"),
-  displayName:String(user.globalName||user.global_name||user.displayName||user.username||"Hesap"),
+  displayName:String(user.global_name||user.globalName||user.displayName||user.username||"Hesap"),
   avatar:user.avatar||null,
-  token:tokenBlob,
-  savedAt:Date.now()
+  discriminator:user.discriminator||"0"
  };
 }
 
-function getCurrentId(){
- try{return String(UserStore?.getCurrentUser?.()?.id||"")}catch{return ""}
+function avatarUrl(account,size=128){
+ if(!account?.id||!account?.avatar)return null;
+ const ext=String(account.avatar).startsWith("a_")?"gif":"png";
+ return `https://cdn.discordapp.com/avatars/${account.id}/${account.avatar}.${ext}?size=${size}`;
+}
+
+function currentUser(){
+ try{return UserStore?.getCurrentUser?.()||null}catch{return null}
+}
+function currentId(){
+ return String(currentUser()?.id||"");
+}
+
+async function saveAccount(user,plainToken,source="current"){
+ if(!user?.id||!plainToken)throw new Error("Hesap bilgisi veya token bulunamadı");
+ const id=String(user.id);
+ const old=storage.accounts[id]||{};
+ const token=await sealToken(plainToken);
+ storage.accounts[id]={
+  ...old,
+  ...normalizeUser(user),
+  token,
+  source,
+  savedAt:old.savedAt||Date.now(),
+  lastSeen:Date.now()
+ };
+ return storage.accounts[id];
 }
 
 async function captureCurrent(silent=true){
  try{
+  discover();
   if(!storage.autoRemember)return null;
-
   const token=TokenManager?.getToken?.();
-  const user=UserStore?.getCurrentUser?.();
-
-  if(!token || !user?.id)return null;
-
-  const old=storage.quickAccounts[String(user.id)];
-  const encrypted=await encryptToken(token);
-
-  storage.quickAccounts[String(user.id)]={
-   ...normalizeAccount(user,encrypted),
-   savedAt:old?.savedAt||Date.now(),
-   lastSeen:Date.now()
-  };
-
-  diag.captured++;
-  if(!silent)toast(`${user.globalName||user.username} hatırlandı`);
-  return storage.quickAccounts[String(user.id)];
+  const user=currentUser();
+  if(!token||!user?.id){
+   if(!silent)toast("Aktif Discord oturumu okunamadı");
+   return null;
+  }
+  const acc=await saveAccount(user,token,"current");
+  diag.currentCaptured=true;
+  return acc;
  }catch(e){
   err("captureCurrent",e);
-  if(!silent)toast(`Hesap kaydedilemedi: ${e?.message||e}`);
+  if(!silent)toast(`Aktif hesap kaydedilemedi: ${e?.message||e}`);
   return null;
  }
 }
 
-function scheduleCapture(delay=500){
+function scheduleCapture(ms=700){
  if(captureTimer)clearTimeout(captureTimer);
  captureTimer=setTimeout(()=>{
   captureTimer=null;
   captureCurrent(true);
- },delay);
+ },ms);
 }
 
-async function fetchUserForToken(token){
- try{
-  const r=await fetch("https://discord.com/api/v9/users/@me",{
-   headers:{Authorization:String(token)}
-  });
-  if(!r.ok)return null;
-  return await r.json();
- }catch{
-  return null;
+async function fetchMe(token){
+ const r=await fetch("https://discord.com/api/v9/users/@me",{
+  headers:{Authorization:String(token)}
+ });
+ let j=null;
+ try{j=await r.json()}catch{}
+ if(!r.ok)throw new Error(j?.message||`Kullanıcı bilgisi alınamadı (HTTP ${r.status})`);
+ return j;
+}
+
+function loginHeaders(){
+ return {
+  "Content-Type":"application/json",
+  "Accept":"application/json",
+  "X-Discord-Locale":"tr"
+ };
+}
+
+function friendlyLoginError(status,data){
+ if(data?.captcha_key||data?.captcha_sitekey){
+  return "Discord CAPTCHA istiyor. CAPTCHA plugin içinden güvenli şekilde çözülemiyor; biraz sonra tekrar dene veya hesabı normal Discord girişinden bir kez aç.";
  }
+ if(status===429)return "Çok fazla giriş denemesi yapıldı. Biraz bekleyip tekrar dene.";
+ if(data?.errors?.login)return "E-posta/telefon bilgisi geçersiz.";
+ if(data?.errors?.password)return "Şifre geçersiz.";
+ if(data?.message)return String(data.message);
+ return `Giriş başarısız (HTTP ${status})`;
 }
 
-function tokenLooksPlausible(token){
- const s=String(token||"");
- return s.length>=30 && (
-  s.startsWith("mfa.")
-  || s.includes(".")
-  || /^[A-Za-z0-9_\-]{40,}$/.test(s)
- );
-}
+/*
+ * Logs into an additional account without changing the currently active
+ * Discord token. It only requests a token from Discord and stores it locally.
+ */
+async function beginCredentialLogin(login,password){
+ const email=String(login||"").trim();
+ const pass=String(password||"");
+ if(!email||!pass)throw new Error("E-posta/telefon ve şifreyi doldur");
 
-async function importTokenMap(value){
- if(!value)return 0;
+ const response=await fetch("https://discord.com/api/v9/auth/login",{
+  method:"POST",
+  headers:loginHeaders(),
+  body:JSON.stringify({
+   login:email,
+   password:pass,
+   undelete:false,
+   login_source:null,
+   gift_code_sku_id:null
+  })
+ });
 
- let entries=[];
+ let data={};
+ try{data=await response.json()}catch{}
 
- if(value instanceof Map){
-  entries=[...value.entries()];
- }else if(Array.isArray(value)){
-  entries=value.map((v,i)=>[String(i),v]);
- }else if(typeof value==="object"){
-  entries=Object.entries(value);
- }
-
- let imported=0;
-
- for(const [hint,raw] of entries.slice(0,20)){
-  let token=null;
-  let profile=null;
-
-  if(typeof raw==="string"){
-   token=raw;
-  }else if(raw && typeof raw==="object"){
-   token=raw.token||raw.authToken||raw.accessToken||null;
-   profile=raw.user||raw.account||raw.profile||null;
-  }
-
-  if(!tokenLooksPlausible(token))continue;
-
-  try{
-   if(!profile?.id){
-    profile=await fetchUserForToken(token);
-   }
-
-   if(!profile?.id && /^\d{10,25}$/.test(String(hint))){
-    profile={
-     id:String(hint),
-     username:`Hesap ${String(hint).slice(-4)}`,
-     global_name:null,
-     avatar:null
-    };
-   }
-
-   if(!profile?.id)continue;
-
-   const id=String(profile.id);
-   if(storage.quickAccounts[id]?.token)continue;
-
-   const encrypted=await encryptToken(token);
-   storage.quickAccounts[id]={
-    ...normalizeAccount(profile,encrypted),
-    savedAt:Date.now(),
-    lastSeen:Date.now(),
-    imported:true
-   };
-   imported++;
-  }catch(e){
-   err("importTokenMap",e);
-  }
+ if(data?.token){
+  const user=await fetchMe(data.token);
+  const account=await saveAccount(user,data.token,"credentials");
+  diag.credentialAdds++;
+  return {type:"done",account};
  }
 
- return imported;
-}
-
-async function tryImportDiscordAccounts(){
- let total=0;
-
- const candidates=[
-  TokenManager,
-  M.findByProps?.("getTokens"),
-  M.findByProps?.("getAllTokens"),
-  M.findByProps?.("getAccountTokens"),
-  M.findByProps?.("getAccounts","getToken")
- ].filter(Boolean);
-
- const methods=["getTokens","getAllTokens","getAccountTokens","getStoredTokens"];
-
- for(const mod of candidates){
-  for(const name of methods){
-   if(typeof mod?.[name]!=="function")continue;
-   try{
-    const result=await Promise.resolve(mod[name]());
-    total+=await importTokenMap(result);
-   }catch{}
-  }
+ if(data?.mfa&&data?.ticket){
+  return {
+   type:"mfa",
+   ticket:String(data.ticket),
+   methods:Array.isArray(data.methods)?data.methods:[]
+  };
  }
 
- diag.nativeImported+=total;
- return total;
+ throw new Error(friendlyLoginError(response.status,data));
 }
 
-async function switchTo(account){
+async function finishTotp(ticket,code){
+ const c=String(code||"").replace(/\s+/g,"").trim();
+ if(!ticket)throw new Error("2FA bileti bulunamadı");
+ if(!c)throw new Error("2FA veya yedek kodunu gir");
+
+ const response=await fetch("https://discord.com/api/v9/auth/mfa/totp",{
+  method:"POST",
+  headers:loginHeaders(),
+  body:JSON.stringify({
+   code:c,
+   ticket:String(ticket),
+   login_source:null,
+   gift_code_sku_id:null
+  })
+ });
+
+ let data={};
+ try{data=await response.json()}catch{}
+
+ if(!response.ok||!data?.token){
+  if(response.status===429)throw new Error("Çok fazla 2FA denemesi. Biraz bekle.");
+  throw new Error(data?.message||"2FA kodu kabul edilmedi");
+ }
+
+ const user=await fetchMe(data.token);
+ const account=await saveAccount(user,data.token,"credentials-mfa");
+ diag.mfaAdds++;
+ return account;
+}
+
+async function switchAccount(account){
  if(!account?.id)return;
-
- const current=getCurrentId();
- if(current===String(account.id)){
+ if(String(account.id)===currentId()){
   toast("Zaten bu hesaptasın");
-  try{ActionSheet?.hideActionSheet?.(SHEET_KEY)}catch{}
   return;
  }
 
+ discover();
  if(typeof Auth?.switchAccountToken!=="function"){
-  throw new Error("Discord'un switchAccountToken modülü bulunamadı");
+  throw new Error("Discord switchAccountToken modülü bulunamadı");
  }
 
- const token=await decryptToken(account.token);
-
- try{
-  try{ActionSheet?.hideActionSheet?.(SHEET_KEY)}catch{}
-  toast(`${account.displayName||account.username} hesabına geçiliyor…`);
-  await Promise.resolve(Auth.switchAccountToken(token));
-  diag.switched++;
-  scheduleCapture(1800);
- }finally{
-  // JavaScript string values cannot be zeroed reliably.
- }
+ const token=await openToken(account.token);
+ await Promise.resolve(Auth.switchAccountToken(token));
+ diag.switches++;
+ scheduleCapture(1800);
 }
 
 function forgetAccount(id){
- const current=getCurrentId();
- if(String(id)===current){
-  toast("Aktif hesabı unutamazsın");
+ const sid=String(id);
+ if(sid===currentId()){
+  toast("Şu an açık hesabı listeden silemezsin");
   return false;
  }
- delete storage.quickAccounts[String(id)];
+ delete storage.accounts[sid];
  return true;
 }
 
-async function beginAddAccount(){
- try{
-  await captureCurrent(true);
-
-  const Alerts=ui?.showConfirmationAlert
-   ? ui
-   : M.findByProps?.("showConfirmationAlert");
-
-  const doLogout=async()=>{
-   try{
-    ActionSheet?.hideActionSheet?.(SHEET_KEY);
-    if(typeof Auth?.logout!=="function")throw new Error("Discord logout modülü bulunamadı");
-    await Promise.resolve(Auth.logout());
-   }catch(e){
-    err("beginAddAccount",e);
-    toast(`Giriş ekranı açılamadı: ${e?.message||e}`);
-   }
-  };
-
-  if(Alerts?.showConfirmationAlert){
-   Alerts.showConfirmationAlert({
-    title:"Başka hesap ekle",
-    content:"Mevcut hesap hatırlandı. Şimdi giriş ekranında diğer hesabına giriş yap. Bundan sonra iki hesap arasında çıkış yapmadan geçebilirsin.",
-    confirmText:"Giriş ekranına git",
-    cancelText:"İptal",
-    confirmColor:"brand",
-    onConfirm:doLogout
-   });
-  }else{
-   await doLogout();
-  }
- }catch(e){
-  err("beginAddAccount",e);
-  toast(e?.message||e);
- }
-}
-
-function accountList(){
- const current=getCurrentId();
- return Object.values(storage.quickAccounts||{})
+function listAccounts(){
+ const active=currentId();
+ return Object.values(storage.accounts||{})
   .filter(a=>a?.id&&a?.token)
   .sort((a,b)=>{
-   if(String(a.id)===current)return -1;
-   if(String(b.id)===current)return 1;
+   if(String(a.id)===active)return -1;
+   if(String(b.id)===active)return 1;
    return Number(b.lastSeen||b.savedAt||0)-Number(a.lastSeen||a.savedAt||0);
   });
 }
 
-function AccountSwitcherSheet(){
+function AccountSwitcherPage(){
  const [,force]=React.useReducer(x=>x+1,0);
+ const [showAdd,setShowAdd]=React.useState(false);
+ const [login,setLogin]=React.useState("");
+ const [password,setPassword]=React.useState("");
+ const [showPassword,setShowPassword]=React.useState(false);
  const [busy,setBusy]=React.useState(false);
+ const [errorText,setErrorText]=React.useState("");
+ const [mfaTicket,setMfaTicket]=React.useState("");
+ const [mfaCode,setMfaCode]=React.useState("");
 
  React.useEffect(()=>{
   let alive=true;
   (async()=>{
+   discover();
    await captureCurrent(true);
-   await tryImportDiscordAccounts();
    if(alive)force();
   })();
   return()=>{alive=false};
  },[]);
 
- const V=RN.View;
- const T=RN.Text;
- const SV=RN.ScrollView||V;
+ const V=RN.View,T=RN.Text,SV=RN.ScrollView||V;
  const P=RN.Pressable||RN.TouchableOpacity||V;
- const Img=RN.Image;
- const current=getCurrentId();
- const accounts=accountList();
+ const I=RN.TextInput,Img=RN.Image;
+ const current=currentId();
+ const accounts=listAccounts();
+ const cu=currentUser();
 
  const st={
-  root:{padding:16,paddingBottom:28,gap:10},
-  header:{fontSize:22,fontWeight:"700",color:"#f2f3f5",marginBottom:2},
-  sub:{fontSize:13,color:"#b5bac1",marginBottom:8},
+  root:{padding:16,paddingBottom:40,gap:12},
+  section:{backgroundColor:"#2b2d31",borderRadius:14,padding:12,gap:10},
+  title:{fontSize:20,fontWeight:"700",color:"#f2f3f5"},
+  sub:{fontSize:13,color:"#b5bac1",lineHeight:18},
+  error:{fontSize:13,color:"#fa777c",lineHeight:18},
+  success:{fontSize:13,color:"#23a55a"},
   card:{
-   flexDirection:"row",
-   alignItems:"center",
-   padding:12,
-   borderRadius:12,
-   backgroundColor:"#2b2d31",
-   gap:12
+   flexDirection:"row",alignItems:"center",gap:11,
+   backgroundColor:"#2b2d31",borderRadius:14,padding:12
   },
   active:{borderWidth:1,borderColor:"#23a55a"},
-  avatar:{
-   width:46,height:46,borderRadius:23,
-   backgroundColor:"#1e1f22"
-  },
+  avatar:{width:48,height:48,borderRadius:24,backgroundColor:"#1e1f22"},
   info:{flex:1,minWidth:0},
-  name:{fontSize:16,fontWeight:"600",color:"#f2f3f5"},
-  user:{fontSize:12,color:"#b5bac1",marginTop:2},
-  badge:{fontSize:12,color:"#23a55a",marginTop:3,fontWeight:"600"},
-  button:{
-   paddingVertical:9,paddingHorizontal:12,
-   borderRadius:8,backgroundColor:"#5865f2"
+  name:{fontSize:16,fontWeight:"700",color:"#f2f3f5"},
+  user:{fontSize:13,color:"#b5bac1",marginTop:2},
+  activeText:{fontSize:12,color:"#23a55a",fontWeight:"700",marginTop:3},
+  input:{
+   backgroundColor:"#1e1f22",color:"#fff",
+   borderWidth:1,borderColor:"#3f4147",
+   paddingHorizontal:12,paddingVertical:11,borderRadius:9,fontSize:15
   },
-  buttonMuted:{backgroundColor:"#404249"},
-  buttonDanger:{backgroundColor:"#3b2a2d"},
-  buttonText:{color:"#fff",fontWeight:"600",fontSize:13},
-  add:{
-   padding:13,borderRadius:10,
-   backgroundColor:"#5865f2",marginTop:4
-  },
-  addText:{color:"#fff",fontSize:15,fontWeight:"700",textAlign:"center"},
-  empty:{
-   padding:14,borderRadius:10,
-   backgroundColor:"#2b2d31"
-  },
-  emptyText:{color:"#b5bac1",fontSize:13,lineHeight:18}
+  btn:{paddingVertical:12,paddingHorizontal:14,borderRadius:9,backgroundColor:"#5865f2"},
+  btnMuted:{backgroundColor:"#404249"},
+  btnDanger:{backgroundColor:"#4a2b2f"},
+  btnGreen:{backgroundColor:"#248046"},
+  btnText:{color:"#fff",fontWeight:"700",fontSize:14,textAlign:"center"},
+  smallBtn:{paddingVertical:8,paddingHorizontal:11,borderRadius:8,backgroundColor:"#5865f2"},
+  smallText:{color:"#fff",fontWeight:"700",fontSize:13},
+  actions:{gap:7},
+  divider:{height:1,backgroundColor:"#3f4147",marginVertical:2}
  };
 
- const onSwitch=async(a)=>{
+ const doCredentialAdd=async()=>{
   if(busy)return;
+  setErrorText("");
+  setBusy(true);
   try{
-   setBusy(true);
-   await switchTo(a);
+   const result=await beginCredentialLogin(login,password);
+   setPassword(""); // password is never kept after the request
+   if(result.type==="mfa"){
+    setMfaTicket(result.ticket);
+    setErrorText("");
+    toast("2FA kodu gerekli");
+   }else{
+    setLogin("");
+    setShowAdd(false);
+    setMfaTicket("");
+    setMfaCode("");
+    toast(`${result.account.displayName} hesaba eklendi`);
+    force();
+   }
   }catch(e){
-   err("switch",e);
-   toast(`Hesap değiştirilemedi: ${e?.message||e}`);
+   setPassword("");
+   setErrorText(String(e?.message||e));
   }finally{
    setBusy(false);
   }
  };
 
- return React.createElement(
-  SV,{contentContainerStyle:st.root},
+ const doMfa=async()=>{
+  if(busy)return;
+  setErrorText("");
+  setBusy(true);
+  try{
+   const acc=await finishTotp(mfaTicket,mfaCode);
+   setMfaTicket("");
+   setMfaCode("");
+   setLogin("");
+   setPassword("");
+   setShowAdd(false);
+   toast(`${acc.displayName} hesaba eklendi`);
+   force();
+  }catch(e){
+   setErrorText(String(e?.message||e));
+  }finally{
+   setBusy(false);
+  }
+ };
 
-  React.createElement(T,{style:st.header},"Hesap Değiştir"),
+ const doSwitch=async(a)=>{
+  if(busy)return;
+  setErrorText("");
+  setBusy(true);
+  try{
+   toast(`${a.displayName||a.username} hesabına geçiliyor…`);
+   await switchAccount(a);
+  }catch(e){
+   setErrorText(`Hesap değiştirilemedi: ${e?.message||e}`);
+  }finally{
+   setBusy(false);
+  }
+ };
+
+ const renderAvatar=(a)=>{
+  const uri=avatarUrl(a);
+  if(uri&&Img)return React.createElement(Img,{source:{uri},style:st.avatar});
+  return React.createElement(
+   V,{style:[st.avatar,{alignItems:"center",justifyContent:"center"}]},
+   React.createElement(T,{style:{color:"#fff",fontSize:19,fontWeight:"800"}},
+    String(a?.displayName||a?.username||"?").slice(0,1).toUpperCase()
+   )
+  );
+ };
+
+ const content=[];
+
+ content.push(
   React.createElement(
-   T,{style:st.sub},
-   "Kayıtlı hesaplarından birine dokun. Aktif hesap yeşil işaretlidir."
-  ),
-
-  accounts.length===0
-   ? React.createElement(
-      V,{style:st.empty},
-      React.createElement(
-       T,{style:st.emptyText},
-       "Henüz hesap bulunamadı. Mevcut hesabın otomatik olarak hatırlanmaya çalışılıyor."
-      )
-     )
-   : accounts.map(a=>{
-      const active=String(a.id)===current;
-      const uri=avatarUrl(a);
-
-      return React.createElement(
-       V,{key:String(a.id),style:[st.card,active&&st.active]},
-
-       uri&&Img
-        ?React.createElement(Img,{source:{uri},style:st.avatar})
-        :React.createElement(
-          V,{style:[st.avatar,{alignItems:"center",justifyContent:"center"}]},
-          React.createElement(T,{style:{color:"#fff",fontSize:18,fontWeight:"700"}},
-           String(a.displayName||a.username||"?").slice(0,1).toUpperCase()
-          )
-         ),
-
-       React.createElement(
-        V,{style:st.info},
-        React.createElement(T,{style:st.name},a.displayName||a.username),
-        React.createElement(T,{style:st.user},`@${a.username}`),
-        active?React.createElement(T,{style:st.badge},"● Şu an açık"):null
-       ),
-
-       active
-        ?React.createElement(
-          V,{style:[st.button,st.buttonMuted]},
-          React.createElement(T,{style:st.buttonText},"Aktif")
-         )
-        :React.createElement(
-          V,{style:{gap:6}},
-          React.createElement(
-           P,{onPress:()=>onSwitch(a),disabled:busy,style:st.button},
-           React.createElement(T,{style:st.buttonText},busy?"…":"Geç")
-          ),
-          React.createElement(
-           P,{
-            onPress:()=>{
-             if(forgetAccount(a.id))force();
-            },
-            style:[st.button,st.buttonDanger]
-           },
-           React.createElement(T,{style:st.buttonText},"Unut")
-          )
-         )
-      );
-     }),
-
-  React.createElement(
-   P,{onPress:beginAddAccount,style:st.add},
-   React.createElement(T,{style:st.addText},"＋ Başka hesap ekle")
-  ),
-
-  React.createElement(
-   T,{style:[st.sub,{marginTop:5}]},
-   "Yeni hesabı yalnızca ilk kez eklerken giriş ekranına gitmen gerekir. Kaydedildikten sonra hesaplar arasında doğrudan geçiş yapılır."
+   V,{key:"intro",style:st.section},
+   React.createElement(T,{style:st.title},"Hesaplar"),
+   React.createElement(
+    T,{style:st.sub},
+    "PC/web sürümündeki gibi kayıtlı hesaplarından birine geç. Yeni hesap eklemek mevcut hesabını kapatmaz."
+   ),
+   errorText?React.createElement(T,{style:st.error},errorText):null
   )
  );
+
+ if(accounts.length===0){
+  content.push(
+   React.createElement(
+    V,{key:"empty",style:st.section},
+    React.createElement(
+     T,{style:st.sub},
+     cu?.id
+      ?`Aktif hesap: ${cu.globalName||cu.global_name||cu.username}. Oturum kaydı hazırlanıyor…`
+      :"Aktif Discord hesabı okunamadı."
+    ),
+    React.createElement(
+     P,{onPress:async()=>{await captureCurrent(false);force()},style:st.btnMuted},
+     React.createElement(T,{style:st.btnText},"Aktif hesabı yeniden algıla")
+    )
+   )
+  );
+ }else{
+  accounts.forEach(a=>{
+   const active=String(a.id)===current;
+   content.push(
+    React.createElement(
+     V,{key:a.id,style:[st.card,active&&st.active]},
+     renderAvatar(a),
+     React.createElement(
+      V,{style:st.info},
+      React.createElement(T,{style:st.name},a.displayName||a.username),
+      React.createElement(T,{style:st.user},`@${a.username}`),
+      active?React.createElement(T,{style:st.activeText},"● Şu an açık"):null
+     ),
+     React.createElement(
+      V,{style:st.actions},
+      active
+       ?React.createElement(
+         V,{style:[st.smallBtn,st.btnMuted]},
+         React.createElement(T,{style:st.smallText},"Aktif")
+        )
+       :React.createElement(
+         P,{onPress:()=>doSwitch(a),disabled:busy,style:st.smallBtn},
+         React.createElement(T,{style:st.smallText},busy?"…":"Geç")
+        ),
+      !active?React.createElement(
+       P,{
+        onPress:()=>{if(forgetAccount(a.id))force()},
+        disabled:busy,
+        style:[st.smallBtn,st.btnDanger]
+       },
+       React.createElement(T,{style:st.smallText},"Unut")
+      ):null
+     )
+    )
+   );
+  });
+ }
+
+ if(!showAdd){
+  content.push(
+   React.createElement(
+    P,{
+     key:"showadd",
+     onPress:()=>{setShowAdd(true);setErrorText("");setMfaTicket("")},
+     style:st.btn
+    },
+    React.createElement(T,{style:st.btnText},"＋ Başka hesap ekle")
+   )
+  );
+ }else{
+  content.push(
+   React.createElement(
+    V,{key:"addform",style:st.section},
+    React.createElement(T,{style:st.title},"Başka hesap ekle"),
+    React.createElement(
+     T,{style:st.sub},
+     mfaTicket
+      ?"Discord bu hesap için iki aşamalı doğrulama istiyor."
+      :"E-posta/telefon ve şifrenle Discord'a giriş yapılır. Mevcut hesabın açık kalır ve şifren kaydedilmez."
+    ),
+
+    !mfaTicket&&I?React.createElement(
+     React.Fragment,null,
+     React.createElement(I,{
+      style:st.input,
+      value:login,
+      onChangeText:setLogin,
+      placeholder:"E-posta veya telefon",
+      placeholderTextColor:"#80848e",
+      autoCapitalize:"none",
+      autoCorrect:false,
+      keyboardType:"email-address",
+      editable:!busy
+     }),
+     React.createElement(I,{
+      style:st.input,
+      value:password,
+      onChangeText:setPassword,
+      placeholder:"Şifre",
+      placeholderTextColor:"#80848e",
+      secureTextEntry:!showPassword,
+      autoCapitalize:"none",
+      autoCorrect:false,
+      editable:!busy,
+      onSubmitEditing:doCredentialAdd
+     }),
+     React.createElement(
+      P,{onPress:()=>setShowPassword(!showPassword),style:[st.btn,st.btnMuted]},
+      React.createElement(T,{style:st.btnText},showPassword?"Şifreyi gizle":"Şifreyi göster")
+     ),
+     React.createElement(
+      P,{onPress:doCredentialAdd,disabled:busy,style:[st.btn,busy&&{opacity:.55}]},
+      React.createElement(T,{style:st.btnText},busy?"Giriş yapılıyor…":"Hesabı ekle")
+     )
+    ):null,
+
+    mfaTicket&&I?React.createElement(
+     React.Fragment,null,
+     React.createElement(I,{
+      style:st.input,
+      value:mfaCode,
+      onChangeText:setMfaCode,
+      placeholder:"6 haneli 2FA veya yedek kod",
+      placeholderTextColor:"#80848e",
+      autoCapitalize:"none",
+      autoCorrect:false,
+      keyboardType:"number-pad",
+      editable:!busy,
+      onSubmitEditing:doMfa
+     }),
+     React.createElement(
+      P,{onPress:doMfa,disabled:busy,style:[st.btn,st.btnGreen,busy&&{opacity:.55}]},
+      React.createElement(T,{style:st.btnText},busy?"Doğrulanıyor…":"2FA ile hesabı ekle")
+     ),
+     React.createElement(
+      P,{onPress:()=>{setMfaTicket("");setMfaCode("");setErrorText("")},style:[st.btn,st.btnMuted]},
+      React.createElement(T,{style:st.btnText},"Geri")
+     )
+    ):null,
+
+    React.createElement(V,{style:st.divider}),
+    React.createElement(
+     P,{
+      onPress:()=>{
+       setShowAdd(false);
+       setPassword("");
+       setMfaTicket("");
+       setMfaCode("");
+       setErrorText("");
+      },
+      style:[st.btn,st.btnMuted]
+     },
+     React.createElement(T,{style:st.btnText},"İptal")
+    ),
+    React.createElement(
+     T,{style:st.sub},
+     "CAPTCHA veya yalnızca passkey isteyen hesaplarda Discord bu dahili giriş yöntemini reddedebilir. Böyle bir durumda plugin mevcut hesabından otomatik çıkış yapmaz."
+    )
+   )
+  );
+ }
+
+ content.push(
+  React.createElement(
+   V,{key:"diag",style:st.section},
+   React.createElement(T,{style:st.sub},
+    `TokenManager ${diag.tokenManager?"OK":"YOK"} | Switch ${diag.auth?"OK":"YOK"} | Navigasyon ${diag.nav?"OK":"YOK"}\n`+
+    `Aktif hesap ${diag.currentCaptured?"kaydedildi":"bekleniyor"} | Eklenen ${diag.credentialAdds+diag.mfaAdds} | Geçiş ${diag.switches}`+
+    `${diag.lastError?`\nSon hata: ${diag.lastError}`:""}`
+   )
+  )
+ );
+
+ return React.createElement(SV,{contentContainerStyle:st.root,keyboardShouldPersistTaps:"handled"},content);
 }
 
-function openAccountSwitcher(){
+function discover(){
  try{
-  if(!React)throw new Error("React bulunamadı");
+  TokenManager=M.findByProps?.("getToken")
+   ||M.findByProps?.("getToken","setToken");
+  diag.tokenManager=!!TokenManager?.getToken;
+ }catch{}
 
-  ActionSheet=ActionSheet||M.findByProps?.("openLazy","hideActionSheet");
-  if(!ActionSheet?.openLazy)throw new Error("Discord ActionSheet modülü bulunamadı");
+ try{
+  Auth=M.findByProps?.("login","logout","switchAccountToken")
+   ||M.findByProps?.("logout","switchAccountToken")
+   ||M.findByProps?.("switchAccountToken");
+  diag.auth=typeof Auth?.switchAccountToken==="function";
+ }catch{}
 
-  captureCurrent(true);
-  ActionSheet.openLazy(
-   Promise.resolve({default:AccountSwitcherSheet}),
-   SHEET_KEY,
-   {}
-  );
+ try{UserStore=M.findByStoreName?.("UserStore")}catch{}
+ try{Flux=M.findByProps?.("dispatch","subscribe")}catch{}
+ try{TabsNavigationRef=M.findByProps?.("getRootNavigationRef");diag.nav=!!TabsNavigationRef?.getRootNavigationRef}catch{}
+}
+
+function openPage(){
+ try{
+  discover();
+  const nav=TabsNavigationRef?.getRootNavigationRef?.();
+  if(!nav?.navigate)throw new Error("Kettu root navigation bulunamadı");
+
+  nav.navigate(CUSTOM_ROUTE,{
+   title:"Hesap Değiştir",
+   render:()=>React.createElement(AccountSwitcherPage)
+  });
  }catch(e){
-  err("openAccountSwitcher",e);
+  err("openPage",e);
   toast(`Hesap Değiştir açılamadı: ${e?.message||e}`);
  }
 }
 
-function rendererTitle(config,key){
+function configTitle(config,key){
  try{
-  const values=[
-   typeof config?.useTitle==="function"?config.useTitle():config?.useTitle,
-   typeof config?.title==="function"?config.title():config?.title,
-   key
-  ];
-  return values.filter(v=>typeof v==="string").join(" ");
- }catch{
-  return String(key||"");
- }
+  let title="";
+  if(typeof config?.useTitle==="function"){
+   // Do not call hooks here; function name/key checks below are the main path.
+  }else if(typeof config?.title==="string"){
+   title=config.title;
+  }
+  return `${String(key||"")} ${title}`.toLocaleLowerCase("tr-TR");
+ }catch{return String(key||"").toLowerCase()}
 }
 
-function looksLikeLogout(key,config){
- const s=rendererTitle(config,key).toLocaleLowerCase("tr-TR");
- return /(^|[\s_-])(log\s*out|logout|sign\s*out|çıkış|oturumu\s*kapat)([\s_-]|$)/i.test(s)
-  || /logout|log_out|sign_out/i.test(String(key||""));
+function isLogoutKey(key,config){
+ const s=configTitle(config,key);
+ return /logout|log_out|signout|sign_out|çıkış|oturumu.?kapat/i.test(s);
 }
 
-function injectRowIntoSections(sections){
+function injectAfterLogout(sections){
  if(!Array.isArray(sections))return false;
-
  const renderer=SettingConstants?.SETTING_RENDERER_CONFIG||{};
 
  for(const section of sections){
   if(!Array.isArray(section?.settings))continue;
-
   if(section.settings.includes(ROW_KEY))return true;
 
-  const logoutIndex=section.settings.findIndex(k=>looksLikeLogout(k,renderer?.[k]));
-  if(logoutIndex!==-1){
-   section.settings.splice(logoutIndex+1,0,ROW_KEY);
+  const idx=section.settings.findIndex(k=>isLogoutKey(k,renderer?.[k]));
+  if(idx>=0){
+   section.settings.splice(idx+1,0,ROW_KEY);
    diag.row=true;
    return true;
   }
  }
 
- // Fallback: put it in the account section if Discord changed the logout key.
+ // Current mobile Discord usually places LOGOUT in the account block.
  const accountSection=sections.find(s=>
   Array.isArray(s?.settings)
-  && s.settings.some(k=>String(k).toUpperCase()==="ACCOUNT" || String(k).toUpperCase().includes("ACCOUNT"))
+  && s.settings.some(k=>String(k).toUpperCase()==="ACCOUNT")
  );
-
  if(accountSection){
-  if(!accountSection.settings.includes(ROW_KEY))accountSection.settings.push(ROW_KEY);
+  const logoutIndex=accountSection.settings.findIndex(k=>/logout/i.test(String(k)));
+  const insertAt=logoutIndex>=0?logoutIndex+1:accountSection.settings.length;
+  if(!accountSection.settings.includes(ROW_KEY)){
+   accountSection.settings.splice(insertAt,0,ROW_KEY);
+  }
   diag.row=true;
   return true;
  }
@@ -615,22 +790,22 @@ function installSettingsRow(){
   }
 
   const originalDescriptor=Object.getOwnPropertyDescriptor(SettingConstants,"SETTING_RENDERER_CONFIG");
-  let rendererValue=SettingConstants.SETTING_RENDERER_CONFIG;
+  let value=SettingConstants.SETTING_RENDERER_CONFIG;
 
   Object.defineProperty(SettingConstants,"SETTING_RENDERER_CONFIG",{
    enumerable:true,
    configurable:true,
    get:()=>({
-    ...rendererValue,
+    ...value,
     [ROW_KEY]:{
      type:"pressable",
      title:()=> "Hesap Değiştir",
      useTitle:()=> "Hesap Değiştir",
-     onPress:openAccountSwitcher,
+     onPress:openPage,
      withArrow:true
     }
    }),
-   set:v=>{rendererValue=v}
+   set:v=>{value=v}
   });
 
   unpatches.push(()=>{
@@ -639,124 +814,41 @@ function installSettingsRow(){
      Object.defineProperty(SettingConstants,"SETTING_RENDERER_CONFIG",originalDescriptor);
     }else{
      Object.defineProperty(SettingConstants,"SETTING_RENDERER_CONFIG",{
-      value:rendererValue,
-      writable:true,
-      configurable:true,
-      enumerable:true
+      value,writable:true,configurable:true,enumerable:true
      });
     }
    }catch{}
   });
 
-  if(CreateListModule && typeof CreateListModule.createList==="function"){
+  if(CreateListModule&&typeof CreateListModule.createList==="function"){
    unpatches.push(
     patcher.after("createList",CreateListModule,(args,ret)=>{
      try{
       const config=args?.[0];
-      if(Array.isArray(config?.sections)){
-       injectRowIntoSections(config.sections);
-       diag.listPatch=true;
-      }
-     }catch(e){
-      err("createList patch",e);
-     }
+      if(Array.isArray(config?.sections))injectAfterLogout(config.sections);
+     }catch(e){err("settings list",e)}
      return ret;
     })
    );
   }
-
-  // Fallback for Discord builds where settings list is already rendered through SettingsOverviewScreen.
-  const SettingsOverviewScreen=M.findByName?.("SettingsOverviewScreen",false);
-  if(SettingsOverviewScreen && typeof SettingsOverviewScreen.default==="function"){
-   unpatches.push(
-    patcher.after("default",SettingsOverviewScreen,(_,tree)=>{
-     try{
-      const seen=new WeakSet();
-      let budget=1200;
-
-      function walk(v,d){
-       if(!v||typeof v!=="object"||d>12||budget--<0)return false;
-       if(seen.has(v))return false;
-       seen.add(v);
-
-       if(Array.isArray(v?.props?.sections)){
-        injectRowIntoSections(v.props.sections);
-        return true;
-       }
-
-       if(Array.isArray(v)){
-        for(const x of v)if(walk(x,d+1))return true;
-       }else{
-        for(const k of Object.keys(v)){
-         if(k==="__proto__"||typeof v[k]==="function")continue;
-         if(walk(v[k],d+1))return true;
-        }
-       }
-       return false;
-      }
-
-      walk(tree,0);
-     }catch(e){
-      err("SettingsOverview fallback",e);
-     }
-     return tree;
-    })
-   );
-  }
-
  }catch(e){
   err("installSettingsRow",e);
  }
 }
 
-function discover(){
- try{
-  TokenManager=
-   M.findByProps?.("getToken")
-   ||M.findByProps?.("getToken","setToken");
-  diag.tokenManager=!!TokenManager;
- }catch{}
-
- try{
-  Auth=
-   M.findByProps?.("login","logout","switchAccountToken")
-   ||M.findByProps?.("logout","switchAccountToken")
-   ||M.findByProps?.("switchAccountToken");
-  diag.auth=typeof Auth?.switchAccountToken==="function";
- }catch{}
-
- try{
-  UserStore=M.findByStoreName?.("UserStore");
- }catch{}
-
- try{
-  Flux=M.findByProps?.("dispatch","subscribe");
- }catch{}
-
- try{
-  ActionSheet=M.findByProps?.("openLazy","hideActionSheet");
- }catch{}
-
- diag.crypto=hasCrypto();
-}
-
-function installCaptureWatcher(){
- if(!Flux || typeof Flux.dispatch!=="function")return;
-
+function installWatcher(){
+ if(!Flux?.dispatch)return;
  unpatches.push(
-  patcher.after("dispatch",Flux,([action])=>{
+  patcher.after("dispatch",Flux,([a])=>{
    try{
-    const type=String(action?.type||"");
+    const type=String(a?.type||"");
     if(
      type==="CONNECTION_OPEN"
-     ||type==="CURRENT_USER_UPDATE"
      ||type==="READY"
-     ||type==="LOGIN_SUCCESS"
-     ||type==="AUTH_SESSION_CHANGE"
+     ||type==="CURRENT_USER_UPDATE"
      ||type.includes("LOGIN_SUCCESS")
-    ){
-     scheduleCapture(900);
-    }
+     ||type==="AUTH_SESSION_CHANGE"
+    ) scheduleCapture(900);
    }catch{}
   })
  );
@@ -766,33 +858,29 @@ function onLoad(){
  defaults();
  discover();
  installSettingsRow();
- installCaptureWatcher();
-
- scheduleCapture(700);
- setTimeout(()=>tryImportDiscordAccounts().catch(()=>{}),1800);
+ installWatcher();
+ scheduleCapture(900);
 }
 
 function onUnload(){
  if(captureTimer)clearTimeout(captureTimer);
  captureTimer=null;
-
  while(unpatches.length){
   try{unpatches.pop()?.()}catch{}
  }
-
- try{ActionSheet?.hideActionSheet?.(SHEET_KEY)}catch{}
  cryptoKeyPromise=null;
 }
 
 return {
  onLoad,
  onUnload,
+ settings:AccountSwitcherPage,
  __test:{
   hasCrypto,
-  rendererTitle,
-  looksLikeLogout,
-  injectRowIntoSections,
-  accountList
+  isLogoutKey,
+  injectAfterLogout,
+  friendlyLoginError,
+  listAccounts
  }
 };
 
