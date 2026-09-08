@@ -1,296 +1,833 @@
 (function(M,common,patcher,plugin,logger,ui,utils){
 "use strict";
-/* Kettu MessageLogger v3.1.0 - bay4lly
- * Mobile DCDChat-focused logger. Keeps store content raw; edit history is render-only.
- * SPDX-License-Identifier: GPL-3.0-or-later
+
+/*
+ * Kettu MessageLogger v4.0.0
+ * Author: bay4lly
+ *
+ * Safe DCDChat implementation:
+ * - Never feeds hand-built fake MessageRecords to RowManager.
+ * - Uses Discord's own createMessageRecord for edit-history render records.
+ * - Deleted messages follow the proven MESSAGE_DELETE -> MESSAGE_UPDATE technique.
+ * - Native RowManager output only receives fields known to Discord's serializer.
  */
+
 const React=common?.React;
 const RN=common?.ReactNative||{};
 const storage=plugin?.storage||{};
+
 const RED="#f04747";
 const OVERLAY_BG="#da373c22";
 const OVERLAY_GUTTER="#da373cff";
-const unpatches=[];
-const deleted=new Map();
-const edits=new Map();
-const rawCurrent=new Map();
-const lastTransitions=new Map();
-const highlightOverrides=new Map();
-let Flux=null,MessageStore=null,RowManager=null,Messages=null,LazyActionSheet=null,ActionSheetRow=null;
-const diag={flux:false,store:false,row:false,sheet:false,editGuard:false,deletes:0,edits:0,deduped:0,rowRenders:0,redPaints:0,overlayPaints:0,inlineRenders:0,lastError:""};
 
-function fail(where,e){diag.lastError=`${where}: ${e?.message||e}`;try{logger?.error?.(diag.lastError,e)}catch{}}
-function toast(s){try{ui?.showToast?.(String(s))}catch{}}
+const unpatches=[];
+const timers=[];
+const rowUnpatches=[];
+
+const deleted=new Map();       // channel:id -> metadata
+const edits=new Map();         // channel:id -> [{content, after, time}]
+const rawCurrent=new Map();    // channel:id -> real current content
+const lastEditEvent=new Map(); // channel:id -> dedupe info
+const whiteOverrides=new Set();// user chose "Beyaz göster"
+
+let Flux=null;
+let MessageStore=null;
+let RowManager=null;
+let RecordUtils=null;
+let MessageRecordModule=null;
+let LazyActionSheet=null;
+let ActionSheetRow=null;
+
+let fluxPatched=false;
+let recordPatched=false;
+let rowPatched=false;
+let sheetPatched=false;
+
+const diag={
+ flux:false,store:false,records:false,row:false,sheet:false,
+ deletes:0,edits:0,deduped:0,rowRenders:0,red:0,overlay:0,
+ renderRecords:0,rearms:0,lastError:""
+};
+
+function fail(where,e){
+ diag.lastError=`${where}: ${e?.message||e}`;
+ try{logger?.error?.(diag.lastError,e)}catch{}
+}
+function toast(v){try{ui?.showToast?.(String(v))}catch{}}
+
 function defaults(){
  if(storage.logDeletes===undefined)storage.logDeletes=true;
  if(storage.logEdits===undefined)storage.logEdits=true;
  if(storage.inlineEdits===undefined)storage.inlineEdits=true;
  if(storage.keepDeletedVisible===undefined)storage.keepDeletedVisible=true;
  if(storage.deletedStyle===undefined)storage.deletedStyle="redText";
- if(storage.showDeletedMarker===undefined)storage.showDeletedMarker=false;
 }
-function key(ch,id){return `${ch||"?"}:${id||"?"}`}
-function chOf(m,f){return m?.channel_id||m?.channelId||f}
+
+function k(ch,id){return `${String(ch||"?")}:${String(id||"?")}`}
+function channelOf(m,fallback){return m?.channel_id||m?.channelId||fallback}
 function idOf(m){return m?.id||m?.message_id||m?.messageId}
-function cloneRecord(o,extra){try{return Object.assign(Object.create(Object.getPrototypeOf(o)),o,extra||{})}catch{return {...o,...(extra||{})}}}
-function messageUpdateData(message,content){
- const d={
+
+function stripLegacy(text){
+ const raw=String(text??"").replace(/\u200B|\u2060/g,"");
+ const lines=raw.split("\n");
+ let i=0,found=false;
+ while(i<lines.length && /^-#\s*✎\s+\d{1,2}:\d{2}\s{2}/.test(lines[i])){
+  found=true;i++;
+  while(i<lines.length && /^-#\s*↳\s{2}/.test(lines[i]))i++;
+ }
+ return found && i<lines.length ? lines.slice(i).join("\n") : raw;
+}
+
+function getStore(ch,id){
+ try{return MessageStore?.getMessage?.(ch,id)||null}catch{return null}
+}
+
+function fmtTime(ms){
+ try{
+  return new Date(ms).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+ }catch{
+  return new Date(ms).toLocaleTimeString().slice(0,5);
+ }
+}
+
+function editTimestamp(m){
+ const v=m?.edited_timestamp||m?.editedTimestamp;
+ const n=v?new Date(v).getTime():Date.now();
+ return Number.isFinite(n)?n:Date.now();
+}
+
+function historyLine(entry){
+ const lines=String(entry.content??"").split("\n");
+ if(!lines.length)return `-# ✎ ${fmtTime(entry.time)}  (boş mesaj)`;
+ return lines.map((line,i)=>
+  `-# ${i===0?`✎ ${fmtTime(entry.time)}  `:"↳  "}${line||" "}`
+ ).join("\n");
+}
+
+function cleanedHistory(key){
+ const src=edits.get(key)||[];
+ const out=[];
+ for(const e of src){
+  const prev=out[out.length-1];
+  if(prev && prev.content===e.content && prev.after===e.after){
+   diag.deduped++;
+   continue;
+  }
+  if(prev && prev.content===e.content && Math.abs(Number(prev.time)-Number(e.time))<30000){
+   diag.deduped++;
+   continue;
+  }
+  out.push(e);
+ }
+ if(out.length!==src.length)edits.set(key,out);
+ return out;
+}
+
+function displayContent(key,current){
+ if(!storage.inlineEdits)return current;
+ const list=cleanedHistory(key);
+ if(!list.length)return current;
+ return `${list.map(historyLine).join("\n")}\n${current}`;
+}
+
+/*
+ * Only fields used by the known-working Ghost Log Native message reconstruction.
+ * Do not spread MessageRecord: many of its fields/getters are non-enumerable.
+ */
+function messageData(message,content,deletedFlag=false){
+ const data={
   id:message?.id,
   channel_id:message?.channel_id||message?.channelId,
   content:String(content??""),
   author:message?.author,
-  attachments:Array.isArray(message?.attachments)?[...message.attachments]:(message?.attachments??[]),
-  embeds:message?.embeds??[],mentions:message?.mentions??[],mention_roles:message?.mention_roles??[],
-  mention_everyone:message?.mention_everyone??false,timestamp:message?.timestamp,
+  attachments:message?.attachments?[...message.attachments]:[],
+  embeds:message?.embeds??[],
+  mentions:message?.mentions??[],
+  mention_roles:message?.mention_roles??[],
+  mention_everyone:message?.mention_everyone??false,
+  timestamp:message?.timestamp,
   edited_timestamp:message?.edited_timestamp??message?.editedTimestamp??null,
-  pinned:message?.pinned??false,tts:message?.tts??false,flags:message?.flags??0,
-  type:message?.type??0,state:message?.state??"SENT",components:message?.components??[],
-  sticker_items:message?.sticker_items??message?.stickerItems??[],__kml_deleted:true
+  pinned:message?.pinned??false,
+  tts:message?.tts??false,
+  flags:message?.flags??0,
+  type:message?.type??0,
+  state:message?.state??"SENT"
  };
+ if(deletedFlag)data.__kml_deleted=true;
+
  if(message?.referenced_message){
-  d.referenced_message=message.referenced_message;
-  d.message_reference=message.message_reference||message.messageReference||{
+  data.referenced_message=message.referenced_message;
+  data.message_reference={
    channel_id:message.referenced_message.channel_id,
-   message_id:message.referenced_message.id
+   message_id:message.referenced_message.id,
+   guild_id:message?.messageReference?.guild_id||message?.message_reference?.guild_id
   };
  }
- return d;
+ return data;
 }
-function getStore(ch,id){try{return MessageStore?.getMessage?.(ch,id)||null}catch{return null}}
-function stripLegacyInline(v){
- const original=String(v??"");const lines=original.split("\n");let i=0,seen=false;
- while(i<lines.length&&/^-#\s*✎\s+.+?\s{2}/.test(lines[i])){
-  seen=true;i++;while(i<lines.length&&/^-#\s*↳\s{2}/.test(lines[i]))i++;
+
+function findRecordUtils(){
+ try{
+  const mod=M.findByProps?.("createMessageRecord","updateMessageRecord");
+  return typeof mod?.createMessageRecord==="function"?mod:mod?.default;
+ }catch{return null}
+}
+
+function makeRenderRecord(original,content,deletedFlag){
+ try{
+  const ru=RecordUtils||findRecordUtils();
+  if(typeof ru?.createMessageRecord!=="function")return null;
+  const rec=ru.createMessageRecord(
+   messageData(original,content,deletedFlag),
+   original?.reactions
+  );
+  if(rec && deletedFlag){
+   try{rec.__kml_deleted=true}catch{}
+  }
+  if(rec)diag.renderRecords++;
+  return rec||null;
+ }catch(e){
+  fail("makeRenderRecord",e);
+  return null;
  }
- return seen&&i<lines.length?lines.slice(i).join("\n"):original;
 }
-function rawText(v){return stripLegacyInline(String(v??"").replace(/\u200B|\u2060/g,""))}
-function editTime(m){const v=m?.edited_timestamp||m?.editedTimestamp;const n=v?new Date(v).getTime():Date.now();return Number.isFinite(n)?n:Date.now()}
-function fmt(ts){try{return new Date(ts).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}catch{return new Date(ts).toLocaleTimeString().slice(0,5)}}
-function subline(content,time){
- const lines=String(content??"").split("\n");
- if(!lines.some(Boolean))return `-# ✎ ${fmt(time)}  (boş mesaj)`;
- return lines.map((x,i)=>`-# ${i===0?`✎ ${fmt(time)}  `:"↳  "}${x||" "}`).join("\n");
-}
-function cleanHistory(k){
- const src=edits.get(k)||[],out=[];
- for(const e of src){
-  const p=out[out.length-1];
-  if(p&&p.content===e.content&&p.after===e.after){diag.deduped++;continue}
-  out.push(e);
- }
- if(out.length!==src.length)edits.set(k,out);
- return out;
-}
-function inlineContent(k,current){
- if(!storage.inlineEdits)return current;
- const list=cleanHistory(k);if(!list.length)return current;
- diag.inlineRenders++;
- return `${list.map(e=>subline(e.content,e.time)).join("\n")}\n${current}`;
-}
-function rememberEdit(ch,id,previous,incoming,before,after){
- if(!ch||!id||before===after)return false;
- const k=key(ch,id);
+
+function rememberEdit(ch,id,incoming){
+ const key=k(ch,id);
+ const previous=getStore(ch,id);
+ const after=stripLegacy(incoming?.content);
+ const before=rawCurrent.has(key)
+  ?rawCurrent.get(key)
+  :stripLegacy(previous?.content);
+
+ // Always move the raw cache forward first.
+ rawCurrent.set(key,after);
+
+ if(before===after)return false;
+
  const stamp=String(incoming?.edited_timestamp||incoming?.editedTimestamp||"");
- const sig=`${before}\u0000${after}\u0000${stamp}`;
- const last=lastTransitions.get(k);
- // One actual Discord edit may be dispatched several times. After the first dispatch
- // rawCurrent already equals 'after', but this signature guard also protects weird bridges.
- if(last?.sig===sig || (last?.before===before&&last?.after===after&&Date.now()-last.seen<15000)){
-  diag.deduped++;return false;
+ const now=Date.now();
+ const last=lastEditEvent.get(key);
+
+ // Strong duplicate suppression:
+ // same resulting content + same edit timestamp, or same transition in 30 sec.
+ if(last && (
+   (stamp && last.stamp===stamp && last.after===after) ||
+   (last.before===before && last.after===after && now-last.seen<30000)
+ )){
+  diag.deduped++;
+  return false;
  }
- const list=edits.get(k)||[];
+
+ const list=edits.get(key)||[];
  const tail=list[list.length-1];
- if(tail&&tail.content===before&&tail.after===after){diag.deduped++;lastTransitions.set(k,{sig,before,after,seen:Date.now()});return false}
- list.push({content:before,after,time:editTime(incoming),stamp});
+
+ if(tail && tail.content===before && (
+   tail.after===after ||
+   Math.abs(Number(tail.time)-editTimestamp(incoming))<30000
+ )){
+  diag.deduped++;
+  lastEditEvent.set(key,{before,after,stamp,seen:now});
+  return false;
+ }
+
+ list.push({
+  content:before,
+  after,
+  time:editTimestamp(incoming)
+ });
  if(list.length>50)list.shift();
- edits.set(k,list);
- lastTransitions.set(k,{sig,before,after,seen:Date.now()});
+ edits.set(key,list);
+ lastEditEvent.set(key,{before,after,stamp,seen:now});
  diag.edits++;
  return true;
 }
-function rememberDelete(ch,id,msg){
- const k=key(ch,id),raw=rawCurrent.get(k)??rawText(msg?.content);
- rawCurrent.set(k,raw);
- if(!deleted.has(k))deleted.set(k,{channelId:String(ch),id:String(id),content:raw,author:msg?.author,deletedAt:Date.now()});
- diag.deletes++;
- return k;
-}
-function markerFor(k,content){return storage.showDeletedMarker&&deleted.has(k)?`🗑 ${content}`:content}
-function highlightOn(k){return highlightOverrides.get(k)!==false}
 
-function renderMessage(row,msg,k){
- const raw=rawCurrent.get(k)??rawText(msg?.content);
- const display=markerFor(k,inlineContent(k,raw));
- return cloneRecord(msg,{content:display,__kml_render_only:true,__kml_raw:raw,__kml_deleted:deleted.has(k)});
+function rememberDelete(ch,id,message){
+ const key=k(ch,id);
+ const content=rawCurrent.has(key)
+  ?rawCurrent.get(key)
+  :stripLegacy(message?.content);
+
+ rawCurrent.set(key,content);
+ if(!deleted.has(key)){
+  deleted.set(key,{
+   channelId:String(ch),
+   id:String(id),
+   content,
+   deletedAt:Date.now()
+  });
+ }
+ diag.deletes++;
+ return key;
 }
-function paintNative(ret,k){
- if(!ret||typeof ret!=="object"||!deleted.has(k)||!highlightOn(k))return ret;
- const mode=storage.deletedStyle||"redText";
+
+function discover(){
  try{
-  // These are the current DCDChat RowManager output fields used by Discord mobile.
-  ret.message=ret.message??{};
-  ret.message.edited="deleted";
-  if(mode==="overlay"){
-   ret.backgroundHighlight=ret.backgroundHighlight??{};
-   const pc=RN?.processColor;
-   ret.backgroundHighlight.backgroundColor=typeof pc==="function"?pc(OVERLAY_BG):OVERLAY_BG;
-   ret.backgroundHighlight.gutterColor=typeof pc==="function"?pc(OVERLAY_GUTTER):OVERLAY_GUTTER;
-   diag.overlayPaints++;
-  }else{
-   ret.message.colorString=RED;
-   diag.redPaints++;
-  }
- }catch(e){fail("paintNative",e)}
- return ret;
-}
-function installRow(){
+  Flux=M.findByProps?.("dispatch","subscribe");
+  diag.flux=!!Flux?.dispatch;
+ }catch{}
+ try{
+  MessageStore=M.findByStoreName?.("MessageStore");
+  diag.store=!!MessageStore;
+ }catch{}
+ try{
+  RecordUtils=findRecordUtils();
+  diag.records=typeof RecordUtils?.createMessageRecord==="function";
+ }catch{}
  try{
   RowManager=M.findByName?.("RowManager");
-  const target=RowManager?.prototype;
-  if(typeof target?.generate!=="function")return;
-  diag.row=true;
-  const pending=[];
-  unpatches.push(patcher.before("generate",target,args=>{
-   let k=null;
-   try{
-    const row=args?.[0];const msg=row?.message||row?.messageRecord||row?.item?.message;
-    const ch=chOf(msg,row?.channelId||row?.channel_id);const id=idOf(msg);
-    if(ch&&id){
-     k=key(ch,id);
-     if((edits.get(k)||[]).length||deleted.has(k)){
-      const nextRow={...row};
-      if(row?.message)nextRow.message=renderMessage(row,msg,k);
-      else if(row?.messageRecord)nextRow.messageRecord=renderMessage(row,msg,k);
-      else if(row?.item?.message)nextRow.item={...row.item,message:renderMessage(row,msg,k)};
-      const next=args.slice();next[0]=nextRow;pending.push(k);return next;
-     }
-    }
-   }catch(e){fail("RowManager input",e)}
-   pending.push(k);return args;
-  }));
-  unpatches.push(patcher.after("generate",target,(args,ret)=>{
-   const k=pending.pop()||null;diag.rowRenders++;
-   return k?paintNative(ret,k):ret;
-  }));
- }catch(e){fail("installRow",e)}
+  diag.row=typeof RowManager?.prototype?.generate==="function";
+ }catch{}
 }
+
+function installRecords(){
+ if(recordPatched)return true;
+ discover();
+
+ let did=false;
+ const ru=RecordUtils;
+
+ if(typeof ru?.createMessageRecord==="function"){
+  let pendingInput=null;
+
+  unpatches.push(patcher.before("createMessageRecord",ru,args=>{
+   pendingInput=args?.[0]||null;
+   return args;
+  }));
+
+  unpatches.push(patcher.after("createMessageRecord",ru,(args,ret)=>{
+   const input=pendingInput;
+   pendingInput=null;
+   try{
+    if(ret && input?.__kml_deleted)ret.__kml_deleted=true;
+   }catch(e){fail("createMessageRecord flag",e)}
+   return ret;
+  }));
+
+  if(typeof ru.updateMessageRecord==="function"){
+   unpatches.push(patcher.instead("updateMessageRecord",ru,(args,original)=>{
+    const oldRecord=args?.[0];
+    const newRecord=args?.[1];
+
+    try{
+     if(newRecord?.__kml_deleted){
+      const made=ru.createMessageRecord(newRecord,oldRecord?.reactions);
+      try{if(made)made.__kml_deleted=true}catch{}
+      return made;
+     }
+    }catch(e){fail("updateMessageRecord deleted",e)}
+
+    return typeof original==="function"
+      ?original.apply(ru,args)
+      :oldRecord;
+   }));
+  }
+  did=true;
+ }
+
+ try{
+  MessageRecordModule=M.findByName?.("MessageRecord",false);
+  if(MessageRecordModule && typeof MessageRecordModule.default==="function"){
+   let pendingDeleted=false;
+
+   unpatches.push(patcher.before("default",MessageRecordModule,args=>{
+    pendingDeleted=!!args?.[0]?.__kml_deleted;
+    return args;
+   }));
+
+   unpatches.push(patcher.after("default",MessageRecordModule,(args,ret)=>{
+    const flag=pendingDeleted;
+    pendingDeleted=false;
+    try{if(ret && flag)ret.__kml_deleted=true}catch{}
+    return ret;
+   }));
+   did=true;
+  }
+ }catch(e){fail("MessageRecord patch",e)}
+
+ if(did){
+  recordPatched=true;
+  diag.records=true;
+ }
+ return did;
+}
+
+function unpatchRow(){
+ while(rowUnpatches.length){
+  try{rowUnpatches.pop()?.()}catch{}
+ }
+ rowPatched=false;
+}
+
+function installRow(forceLast=false){
+ discover();
+
+ if(forceLast && rowPatched){
+  unpatchRow();
+  diag.rearms++;
+ }
+
+ if(rowPatched)return true;
+
+ const target=RowManager?.prototype;
+ if(typeof target?.generate!=="function")return false;
+
+ rowPatched=true;
+ diag.row=true;
+
+ /*
+  * Before generate:
+  * For edited messages only, replace row.message with a REAL MessageRecord made
+  * by Discord's own createMessageRecord. This is render-only and never enters MessageStore.
+  */
+ rowUnpatches.push(patcher.before("generate",target,args=>{
+  try{
+   const row=args?.[0];
+   if(row?.rowType!==1)return args;
+
+   const msg=row?.message;
+   if(!msg)return args;
+
+   const ch=channelOf(msg,row?.channelId||row?.channel_id);
+   const id=idOf(msg);
+   if(!ch||!id)return args;
+
+   const key=k(ch,id);
+   const list=cleanedHistory(key);
+   if(!storage.inlineEdits || !list.length)return args;
+
+   const current=rawCurrent.has(key)
+    ?rawCurrent.get(key)
+    :stripLegacy(msg.content);
+
+   const content=displayContent(key,current);
+   const deletedFlag=!!msg.__kml_deleted || deleted.has(key);
+
+   const renderRecord=makeRenderRecord(msg,content,deletedFlag);
+   if(!renderRecord)return args;
+
+   const nextRow={...row,message:renderRecord};
+   const nextArgs=args.slice();
+   nextArgs[0]=nextRow;
+   return nextArgs;
+  }catch(e){
+   fail("RowManager before",e);
+   return args;
+  }
+ }));
+
+ /*
+  * After generate:
+  * ONLY write fields known to Discord's native DCDChat serializer.
+  * No custom `color`, no `textColorString`, no extra background fields.
+  */
+ rowUnpatches.push(patcher.after("generate",target,(args,ret)=>{
+  try{
+   diag.rowRenders++;
+
+   const row=args?.[0];
+   if(row?.rowType!==1 || !ret || typeof ret!=="object")return ret;
+
+   const msg=row?.message;
+   if(!msg)return ret;
+
+   const ch=channelOf(msg,row?.channelId||row?.channel_id);
+   const id=idOf(msg);
+   const key=ch&&id?k(ch,id):null;
+
+   const isDeleted=!!msg.__kml_deleted || !!(key&&deleted.has(key));
+   if(!isDeleted)return ret;
+
+   if(key && whiteOverrides.has(key))return ret;
+
+   ret.message=ret.message??{};
+   ret.message.edited="deleted";
+
+   if(storage.deletedStyle==="overlay"){
+    const pc=RN?.processColor;
+    // Native serializer expects processed colors here. Do nothing if processColor
+    // is unavailable rather than feeding strings into an integer field.
+    if(typeof pc==="function"){
+     ret.backgroundHighlight=ret.backgroundHighlight??{};
+     ret.backgroundHighlight.backgroundColor=pc(OVERLAY_BG);
+     ret.backgroundHighlight.gutterColor=pc(OVERLAY_GUTTER);
+     diag.overlay++;
+    }
+   }else{
+    // colorString is an existing supported DCDChat field. Force it to red even if
+    // another plugin had already generated a normal white value.
+    ret.message.colorString=RED;
+    diag.red++;
+   }
+
+   return ret;
+  }catch(e){
+   fail("RowManager after",e);
+   return ret;
+  }
+ }));
+
+ return true;
+}
+
 function invalidate(ch,id){
  try{
-  for(const o of [RowManager,RowManager?.prototype])if(o)for(const n of ["invalidateMessage","invalidateRow","invalidate","updateRow","updateMessage","clearMessageCache","clearCache"]){
-   if(typeof o[n]==="function")try{o[n](ch,id)}catch{try{o[n](id)}catch{}}
+  for(const host of [RowManager,RowManager?.prototype]){
+   if(!host)continue;
+   for(const name of [
+    "invalidateMessage","invalidateRow","invalidate",
+    "updateRow","updateMessage","clearMessageCache","clearCache"
+   ]){
+    if(typeof host[name]!=="function")continue;
+    try{host[name](ch,id)}catch{
+     try{host[name](id)}catch{}
+    }
+   }
   }
   MessageStore?.emitChange?.();
  }catch{}
 }
-function refresh(ch,id){setTimeout(()=>invalidate(ch,id),0);setTimeout(()=>invalidate(ch,id),80)}
+function refresh(ch,id){
+ setTimeout(()=>invalidate(ch,id),0);
+ setTimeout(()=>invalidate(ch,id),120);
+}
 
 function installFlux(){
- try{
-  Flux=M.findByProps?.("dispatch","subscribe");MessageStore=M.findByStoreName?.("MessageStore");
-  diag.flux=!!Flux;diag.store=!!MessageStore;if(!Flux?.dispatch)return;
-  unpatches.push(patcher.before("dispatch",Flux,args=>{
-   const a=args?.[0];
-   try{
-    if(!a||a.__kmlInternal)return;
-    if(a.type==="MESSAGE_CREATE"){
-     const m=a.message,ch=chOf(m,a.channelId||a.channel_id),id=idOf(m);
-     if(ch&&id&&m?.content!==undefined)rawCurrent.set(key(ch,id),rawText(m.content));
-     return;
+ if(fluxPatched)return true;
+ discover();
+ if(typeof Flux?.dispatch!=="function")return false;
+
+ fluxPatched=true;
+
+ unpatches.push(patcher.before("dispatch",Flux,args=>{
+  const event=args?.[0];
+
+  try{
+   if(!event || event.__kml_internal)return args;
+
+   if(event.type==="MESSAGE_CREATE"){
+    const m=event.message;
+    const ch=channelOf(m,event.channelId||event.channel_id);
+    const id=idOf(m);
+    if(ch&&id&&m?.content!==undefined){
+     rawCurrent.set(k(ch,id),stripLegacy(m.content));
     }
-    if(a.type==="MESSAGE_UPDATE"&&storage.logEdits){
-     const m=a.message;if(!m||m.content===undefined)return;
-     const ch=chOf(m,a.channelId||a.channel_id),id=idOf(m);if(!ch||!id)return;
-     const k=key(ch,id);const previous=getStore(ch,id);
-     const after=rawText(m.content);
-     const before=rawCurrent.has(k)?rawCurrent.get(k):rawText(previous?.content);
-     // IMPORTANT: update raw cache first. A duplicate event then becomes before===after.
-     rawCurrent.set(k,after);
-     if(previous&&before!==after)rememberEdit(ch,id,previous,m,before,after);
-     // Do NOT mutate a.message.content. v2 did that, which polluted MessageStore and caused
-     // duplicate edit-history entries and FakeNitro/plugin conflicts.
-     return;
+    return args;
+   }
+
+   if(event.type==="MESSAGE_UPDATE"){
+    const m=event.message;
+    if(!m || m.__kml_deleted || m.content===undefined)return args;
+
+    if(storage.logEdits){
+     const ch=channelOf(m,event.channelId||event.channel_id);
+     const id=idOf(m);
+     if(ch&&id)rememberEdit(ch,id,m);
     }
-    if(a.type==="MESSAGE_DELETE"&&storage.logDeletes){
-     const ch=a.channelId||a.channel_id,id=a.id||a.messageId||a.message_id;if(!ch||!id)return;
-     const original=getStore(ch,id);if(!original)return;
-     const k=rememberDelete(ch,id,original);
-     if(storage.keepDeletedVisible){
-      const raw=rawCurrent.get(k)??rawText(original.content);
-      // Replace the raw delete with a full MESSAGE_UPDATE payload. This avoids relying
-      // on enumerable fields of Discord's MessageRecord class.
-      args[0]={type:"MESSAGE_UPDATE",message:messageUpdateData(original,raw),__kmlInternal:true};
-      refresh(ch,id);
-     }
-     return args;
+    return args;
+   }
+
+   if(event.type==="MESSAGE_DELETE" && storage.logDeletes){
+    const ch=event.channelId||event.channel_id;
+    const id=event.id||event.messageId||event.message_id;
+    if(!ch||!id)return args;
+
+    const original=getStore(ch,id);
+    if(!original || original.state==="SEND_FAILED")return args;
+
+    const key=rememberDelete(ch,id,original);
+
+    if(storage.keepDeletedVisible){
+     const content=rawCurrent.get(key)??stripLegacy(original.content);
+
+     // Proven mobile technique: replace the delete itself with a real message update.
+     args[0]={
+      type:"MESSAGE_UPDATE",
+      message:messageData(original,content,true),
+      __kml_internal:true
+     };
+
+     refresh(ch,id);
     }
-    if(a.type==="MESSAGE_DELETE_BULK"&&storage.logDeletes){
-     const ch=a.channelId||a.channel_id,ids=a.ids||a.messageIds||a.message_ids||[];
-     const rows=[];
-     for(const id of ids){const original=getStore(ch,id);if(original){rememberDelete(ch,id,original);rows.push([id,original])}}
-     if(storage.keepDeletedVisible&&rows.length){
-      args[0]={type:"KML_BULK_SWALLOWED",__kmlInternal:true};
-      setTimeout(()=>{for(const [id,original] of rows){
-       try{Flux.dispatch({type:"MESSAGE_UPDATE",channelId:ch,message:messageUpdateData(original,rawCurrent.get(key(ch,id))??rawText(original.content)),__kmlInternal:true});refresh(ch,id)}catch{}
-      }},0);
-      return args;
-     }
+    return args;
+   }
+
+   if(event.type==="MESSAGE_DELETE_BULK" && storage.logDeletes){
+    const ch=event.channelId||event.channel_id;
+    const ids=event.ids||event.messageIds||event.message_ids||[];
+    if(!ch || !Array.isArray(ids) || !ids.length)return args;
+
+    const found=[];
+    for(const id of ids){
+     const original=getStore(ch,id);
+     if(!original || original.state==="SEND_FAILED")continue;
+     const key=rememberDelete(ch,id,original);
+     found.push({
+      id,
+      original,
+      content:rawCurrent.get(key)??stripLegacy(original.content)
+     });
     }
-   }catch(e){fail("Flux",e)}
-  }));
- }catch(e){fail("installFlux",e)}
+
+    if(storage.keepDeletedVisible && found.length){
+     // Use a real MESSAGE_UPDATE for the first item instead of inventing an
+     // unknown Flux event type. Schedule the rest immediately after.
+     const first=found.shift();
+     args[0]={
+      type:"MESSAGE_UPDATE",
+      message:messageData(first.original,first.content,true),
+      __kml_internal:true
+     };
+
+     setTimeout(()=>{
+      for(const item of found){
+       try{
+        Flux.dispatch({
+         type:"MESSAGE_UPDATE",
+         message:messageData(item.original,item.content,true),
+         __kml_internal:true
+        });
+        refresh(ch,item.id);
+       }catch{}
+      }
+     },0);
+
+     refresh(ch,first.id);
+    }
+    return args;
+   }
+
+  }catch(e){
+   fail("Flux",e);
+  }
+
+  return args;
+ }));
+
+ return true;
 }
-function installEditGuard(){
- try{
-  Messages=M.findByProps?.("sendMessage","editMessage","startEditMessage")||M.findByProps?.("startEditMessage","editMessage");
-  if(typeof Messages?.startEditMessage!=="function")return;
-  unpatches.push(patcher.before("startEditMessage",Messages,args=>{
-   try{
-    const ch=args?.[0],id=args?.[1],raw=rawCurrent.get(key(ch,id));if(raw===undefined)return;
-    for(let i=2;i<args.length;i++){
-     if(typeof args[i]==="string"){args[i]=raw;break}
-     if(args[i]&&typeof args[i]==="object"&&typeof args[i].content==="string"){args[i]={...args[i],content:raw};break}
-    }
-   }catch(e){fail("editGuard",e)}
-  }));diag.editGuard=true;
- }catch(e){fail("installEditGuard",e)}
-}
+
 function findRows(root){
- const seen=new WeakSet();let budget=1500;
- function walk(v,d){if(v==null||d>12||budget--<0)return null;if(Array.isArray(v)&&v.some(x=>x?.props&&typeof x.props.onPress==="function"))return v;if(typeof v!=="object")return null;if(seen.has(v))return null;seen.add(v);for(const k of Object.keys(v)){if(typeof v[k]==="function")continue;const r=walk(v[k],d+1);if(r)return r}return null}
+ const seen=new WeakSet();
+ let budget=1400;
+
+ function walk(v,depth){
+  if(v==null||depth>12||budget--<=0)return null;
+  if(Array.isArray(v) && v.some(x=>x?.props&&typeof x.props.onPress==="function"))return v;
+  if(typeof v!=="object")return null;
+  if(seen.has(v))return null;
+  seen.add(v);
+
+  for(const name of Object.keys(v)){
+   if(typeof v[name]==="function")continue;
+   const got=walk(v[name],depth+1);
+   if(got)return got;
+  }
+  return null;
+ }
+
  return walk(root,0);
 }
+
 function installLongPress(){
+ if(sheetPatched)return true;
+
  try{
   LazyActionSheet=M.findByProps?.("openLazy","hideActionSheet");
-  ActionSheetRow=M.findByProps?.("ActionSheetRow")?.ActionSheetRow||common?.ActionSheetRow||ui?.components?.FormRow;
-  if(!LazyActionSheet?.openLazy||!ActionSheetRow)return;
+  ActionSheetRow=
+   M.findByProps?.("ActionSheetRow")?.ActionSheetRow||
+   common?.ActionSheetRow||
+   ui?.components?.FormRow;
+
+  if(!LazyActionSheet?.openLazy||!ActionSheetRow)return false;
+
   unpatches.push(patcher.before("openLazy",LazyActionSheet,([component,sheetKey,props])=>{
-   const m=props?.message,k=m?key(chOf(m),idOf(m)):null;
-   if(sheetKey!=="MessageLongPressActionSheet"||!k||!deleted.has(k)||!component?.then)return;
-   component.then(mod=>{if(typeof mod?.default!=="function")return;const u=patcher.after("default",mod,(_,tree)=>{
-    setTimeout(()=>{try{u()}catch{}},0);const rows=findRows(tree);if(!rows||rows.some(r=>r?.props?.__kmlToggle))return;
-    const on=highlightOn(k);rows.push(React.createElement(ActionSheetRow,{key:"kml-toggle",__kmlToggle:true,label:on?"Beyaz göster":"Kırmızı göster",onPress:()=>{highlightOverrides.set(k,!on);LazyActionSheet.hideActionSheet?.();refresh(chOf(m),idOf(m))}}));
-   })}).catch?.(()=>{});
-  }));diag.sheet=true;
- }catch(e){fail("installLongPress",e)}
+   const msg=props?.message;
+   const ch=channelOf(msg);
+   const id=idOf(msg);
+   const key=ch&&id?k(ch,id):null;
+
+   if(sheetKey!=="MessageLongPressActionSheet"||!key||!deleted.has(key)||!component?.then)return;
+
+   component.then(mod=>{
+    if(typeof mod?.default!=="function")return;
+
+    const un=patcher.after("default",mod,(_,tree)=>{
+     setTimeout(()=>{try{un()}catch{}},0);
+
+     const rows=findRows(tree);
+     if(!rows||rows.some(r=>r?.props?.__kmlWhiteToggle))return;
+
+     const white=whiteOverrides.has(key);
+
+     rows.push(React.createElement(ActionSheetRow,{
+      key:"kml-white-toggle",
+      __kmlWhiteToggle:true,
+      label:white?"Kırmızı göster":"Beyaz göster",
+      onPress:()=>{
+       if(white)whiteOverrides.delete(key);
+       else whiteOverrides.add(key);
+       try{LazyActionSheet.hideActionSheet?.()}catch{}
+       refresh(ch,id);
+      }
+     }));
+    });
+   }).catch?.(()=>{});
+  }));
+
+  sheetPatched=true;
+  diag.sheet=true;
+  return true;
+ }catch(e){
+  fail("longPress",e);
+  return false;
+ }
 }
-function clearAll(){deleted.clear();edits.clear();rawCurrent.clear();lastTransitions.clear();highlightOverrides.clear()}
+
+function installAll(){
+ discover();
+ installRecords();
+ installFlux();
+ installRow(false);
+ installLongPress();
+}
+
+function clearSession(){
+ deleted.clear();
+ edits.clear();
+ rawCurrent.clear();
+ lastEditEvent.clear();
+ whiteOverrides.clear();
+}
+
 function Settings(){
  if(!React||!RN.View||!RN.Text)return null;
- const[,force]=React.useReducer(x=>x+1,0);const V=RN.View,T=RN.Text,SV=RN.ScrollView||V,Sw=RN.Switch,P=RN.Pressable||RN.TouchableOpacity||V;
- const st={root:{padding:16,paddingBottom:32,gap:10},h:{fontSize:22,fontWeight:"700",color:"#fff"},c:{padding:12,borderRadius:11,backgroundColor:"#2b2d31",gap:9},r:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:8},t:{fontSize:15,color:"#fff",flex:1},sub:{fontSize:12,color:"#b5bac1",lineHeight:17},b:{padding:10,borderRadius:8,backgroundColor:"#404249"},on:{backgroundColor:"#5865f2"},bt:{color:"#fff",fontWeight:"600",textAlign:"center"}};
- const set=(k,v)=>{storage[k]=v;force();if(k==="deletedStyle")for(const d of deleted.values())refresh(d.channelId,d.id)};
- const row=(l,k)=>React.createElement(V,{style:st.r},React.createElement(T,{style:st.t},l),Sw&&React.createElement(Sw,{value:!!storage[k],onValueChange:v=>set(k,v)}));
- const btn=(l,fn,on)=>React.createElement(P,{onPress:fn,style:[st.b,on&&st.on]},React.createElement(T,{style:st.bt},l));
+
+ const[,force]=React.useReducer(x=>x+1,0);
+ const V=RN.View,T=RN.Text,SV=RN.ScrollView||V;
+ const Sw=RN.Switch,P=RN.Pressable||RN.TouchableOpacity||V;
+
+ const st={
+  root:{padding:16,paddingBottom:32,gap:10},
+  h:{fontSize:22,fontWeight:"700",color:"#fff"},
+  card:{padding:12,borderRadius:11,backgroundColor:"#2b2d31",gap:9},
+  row:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:8},
+  text:{fontSize:15,color:"#fff",flex:1},
+  sub:{fontSize:12,color:"#b5bac1",lineHeight:17},
+  btn:{padding:10,borderRadius:8,backgroundColor:"#404249"},
+  on:{backgroundColor:"#5865f2"},
+  bt:{color:"#fff",fontWeight:"600",textAlign:"center"}
+ };
+
+ const set=(name,value)=>{
+  storage[name]=value;
+  force();
+  if(name==="deletedStyle"){
+   for(const d of deleted.values())refresh(d.channelId,d.id);
+   // Re-arm RowManager after other visual plugins so our supported colorString
+   // write is the final visual pass.
+   installRow(true);
+  }
+ };
+
+ const row=(label,name)=>
+  React.createElement(V,{style:st.row},
+   React.createElement(T,{style:st.text},label),
+   Sw&&React.createElement(Sw,{
+    value:!!storage[name],
+    onValueChange:v=>set(name,v)
+   })
+  );
+
+ const btn=(label,fn,on)=>
+  React.createElement(P,{onPress:fn,style:[st.btn,on&&st.on]},
+   React.createElement(T,{style:st.bt},label)
+  );
+
  return React.createElement(SV,{contentContainerStyle:st.root},
-  React.createElement(T,{style:st.h},"MessageLogger"),
-  React.createElement(V,{style:st.c},row("Silinen mesajları tut","logDeletes"),row("Edit geçmişini tut","logEdits"),row("Edit geçmişini mesaj üstünde göster","inlineEdits"),row("Silinen mesajı sohbette bırak","keepDeletedVisible"),row("Silinen işareti (🗑) fallback","showDeletedMarker")),
-  React.createElement(V,{style:st.c},React.createElement(T,{style:st.t},"Silinen mesaj görünümü"),btn("Kırmızı yazı",()=>set("deletedStyle","redText"),storage.deletedStyle==="redText"),btn("Kırmızı overlay",()=>set("deletedStyle","overlay"),storage.deletedStyle==="overlay")),
-  React.createElement(V,{style:st.c},React.createElement(T,{style:st.sub},`Flux ${diag.flux?"OK":"YOK"} | Store ${diag.store?"OK":"YOK"} | RowManager ${diag.row?"OK":"YOK"}\nSilme ${diag.deletes} | Edit ${diag.edits} | Tekrar engellendi ${diag.deduped}\nRow render ${diag.rowRenders} | Kırmızı ${diag.redPaints} | Overlay ${diag.overlayPaints} | Inline ${diag.inlineRenders}${diag.lastError?`\n${diag.lastError}`:""}`),btn("Oturum logunu temizle",()=>{clearAll();force()}))
+  React.createElement(T,{style:st.h},"MessageLogger v4"),
+  React.createElement(V,{style:st.card},
+   row("Silinen mesajları logla","logDeletes"),
+   row("Silinen mesajı sohbette bırak","keepDeletedVisible"),
+   row("Düzenlemeleri logla","logEdits"),
+   row("Eski düzenlemeleri mesajın üstünde göster","inlineEdits")
+  ),
+  React.createElement(V,{style:st.card},
+   React.createElement(T,{style:st.text},"Silinen mesaj görünümü"),
+   btn("Kırmızı yazı",()=>set("deletedStyle","redText"),storage.deletedStyle==="redText"),
+   btn("Kırmızı overlay",()=>set("deletedStyle","overlay"),storage.deletedStyle==="overlay")
+  ),
+  React.createElement(V,{style:st.card},
+   React.createElement(T,{style:st.sub},
+    `Flux ${diag.flux?"OK":"YOK"} | Store ${diag.store?"OK":"YOK"} | Records ${diag.records?"OK":"YOK"} | Row ${diag.row?"OK":"YOK"}\n`+
+    `Silme ${diag.deletes} | Edit ${diag.edits} | Tekrar ${diag.deduped} | RenderRecord ${diag.renderRecords}\n`+
+    `Row ${diag.rowRenders} | Kırmızı ${diag.red} | Overlay ${diag.overlay} | Rearm ${diag.rearms}`+
+    `${diag.lastError?`\nSon hata: ${diag.lastError}`:""}`
+   ),
+   btn("RowManager renk patch'ini sona taşı",()=>{
+    installRow(true);
+    for(const d of deleted.values())refresh(d.channelId,d.id);
+    toast("MessageLogger görsel patch'i yeniden sona taşındı");
+    force();
+   }),
+   btn("Oturum logunu temizle",()=>{
+    clearSession();
+    force();
+   })
+  )
  );
 }
-function onLoad(){defaults();installFlux();installRow();installEditGuard();installLongPress()}
-function onUnload(){while(unpatches.length){try{unpatches.pop()?.()}catch{}}clearAll()}
-return {onLoad,onUnload,settings:Settings,__test:{rememberEdit,cleanHistory,inlineContent,paintNative,stripLegacyInline,messageUpdateData,deleted,edits,rawCurrent}};
-})(vendetta.metro,vendetta.metro.common,vendetta.patcher,vendetta.plugin,vendetta.logger,vendetta.ui,vendetta.utils)
+
+function onLoad(){
+ defaults();
+ installAll();
+
+ // Discord modules and other plugins finish loading asynchronously.
+ // Retry discovery, then deliberately re-arm our RowManager visual patch late
+ // so FakeNitro/theme render patches do not overwrite the deleted colour.
+ for(const ms of [250,1000,3000,7000]){
+  timers.push(setTimeout(installAll,ms));
+ }
+ for(const ms of [4500,9000]){
+  timers.push(setTimeout(()=>{
+   installRecords();
+   installRow(true);
+  },ms));
+ }
+}
+
+function onUnload(){
+ for(const t of timers)clearTimeout(t);
+ timers.length=0;
+
+ unpatchRow();
+
+ while(unpatches.length){
+  try{unpatches.pop()?.()}catch{}
+ }
+
+ fluxPatched=false;
+ recordPatched=false;
+ sheetPatched=false;
+
+ clearSession();
+}
+
+return {
+ onLoad,
+ onUnload,
+ settings:Settings,
+ __test:{
+  stripLegacy,
+  messageData,
+  rememberEdit,
+  cleanedHistory,
+  displayContent,
+  deleted,
+  edits,
+  rawCurrent
+ }
+};
+
+})(vendetta.metro,vendetta.metro.common,vendetta.patcher,vendetta.plugin,vendetta.logger,vendetta.ui,vendetta.utils);
