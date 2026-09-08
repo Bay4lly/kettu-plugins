@@ -1,13 +1,13 @@
 {
   "name": "Kettu ChannelTabs",
-  "description": "Discord mobilde kalıcı Chrome tarzı kanal/DM sekmeleri. v3.4 yükleme sırasında oluşan fatal ReferenceError düzeltildi.",
+  "description": "Chrome tarzı kalıcı kanal/DM sekmeleri. v3.5 varsayılan olarak sekme çubuğunu 4px aşağı alır ve konum ayarı ekler.",
   "authors": [
     {
       "name": "bay4lly"
     }
   ],
   "main": "index.js",
-  "hash": "3.4.0",
+  "hash": "3.5.0",
   "vendetta": {
     "icon": "ic_tabs_24px"
   }
